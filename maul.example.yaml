@@ -1,0 +1,28 @@
+# Example Maul configuration.
+# Copy to maul.yaml and adjust for your environment:
+#   cp maul.example.yaml maul.yaml
+#
+# maul.yaml is gitignored — keep local overrides and secrets out of the repo.
+# The API key is NOT configured here; clients send it via Authorization.
+
+proxy_listen: "0.0.0.0:7777"
+
+# OpenAI-compatible upstream only (v0.1). Examples:
+#   https://api.openai.com
+#   https://openrouter.ai/api
+#   http://localhost:4000          # LiteLLM / local gateway
+upstream_base_url: "https://api.openai.com"
+
+# Active fault scenarios (ignored until fault injection is implemented).
+# Examples: force_500, malformed_tool_call_json
+scenarios: []
+
+# Per-request probability of injecting an active scenario (0.0–1.0).
+probability: 0.0
+
+# Seed for reproducible chaos runs (same seed → same injection decisions).
+seed: 0
+
+budget:
+  max_llm_calls: 100
+  max_cost_usd: 5.0

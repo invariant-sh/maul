@@ -1,0 +1,6 @@
+/target
+.DS_Store
+*.swp
+
+# Local runtime config (copy from maul.example.yaml)
+maul.yaml
