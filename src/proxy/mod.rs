@@ -1,18 +1,21 @@
-//! Pass-through reverse proxy: stream both directions, filter hop-by-hop headers.
+//! Pass-through reverse proxy: bounded request body + streamed upstream response.
 
 mod headers;
 mod upstream;
 
+pub use headers::{HOP_BY_HOP, hop_by_hop_filter, strip_content_length};
+pub use upstream::build_upstream_url;
+
 use axum::{
-    body::Body,
+    body::{Body, to_bytes},
     extract::Request,
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use reqwest::Client;
 
-use self::headers::{hop_by_hop_filter, strip_content_length};
-use self::upstream::build_upstream_url;
+/// Hard cap for inbound request bodies (chat JSON is small; SSE lives on the response).
+pub const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Forward an inbound request to the configured OpenAI-compatible upstream.
 pub async fn reverse_proxy(client: &Client, upstream_base_url: &str, req: Request) -> Response {
@@ -24,17 +27,28 @@ pub async fn reverse_proxy(client: &Client, upstream_base_url: &str, req: Reques
         .unwrap_or_else(|| "/".to_owned());
     let url = build_upstream_url(upstream_base_url, &path_and_query);
 
-    let headers = hop_by_hop_filter(req.headers().clone());
+    // Strip Content-Length: we rebuild the body bytes and let reqwest set framing.
+    let headers = strip_content_length(hop_by_hop_filter(req.headers().clone()));
     let body = req.into_body();
 
     tracing::debug!(%method, %url, "proxying request");
 
-    let upstream_body = reqwest::Body::wrap_stream(body.into_data_stream());
+    let body_bytes = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, "request body exceeds limit or failed to read");
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                format!("maul: request body exceeds {MAX_REQUEST_BODY_BYTES} byte limit"),
+            )
+                .into_response();
+        }
+    };
 
     let upstream_response = match client
         .request(method, &url)
         .headers(headers)
-        .body(upstream_body)
+        .body(body_bytes)
         .send()
         .await
     {

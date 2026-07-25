@@ -157,6 +157,18 @@ cargo test
 
 CI runs the same checks on every push/PR to `main` (see `.github/workflows/ci.yml`).
 
+**Test layout:**
+
+```text
+tests/
+  headers.rs         # hop-by-hop filter + content-length
+  upstream.rs        # URL builder
+  config.rs          # YAML load / error paths
+  reverse_proxy.rs   # end-to-end proxy vs wiremock
+```
+
+Production code stays in `src/` without embedded test modules. The crate is a **library + thin binary** so `tests/*` can call `maul::proxy` / `maul::config` like any other consumer.
+
 ---
 
 ## Releases & packages

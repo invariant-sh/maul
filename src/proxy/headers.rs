@@ -1,4 +1,17 @@
-use reqwest::header::{HeaderMap, HeaderName, CONTENT_LENGTH};
+use reqwest::header::{CONTENT_LENGTH, HeaderMap, HeaderName};
+
+/// RFC 7230 hop-by-hop / connection-local names (lowercase, as `HeaderName::as_str`).
+pub const HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailers",
+    "transfer-encoding",
+    "upgrade",
+    "host",
+];
 
 /// Drop hop-by-hop / connection-local headers; keep everything else to forward.
 pub fn hop_by_hop_filter(headers: HeaderMap) -> HeaderMap {
@@ -18,16 +31,5 @@ pub fn strip_content_length(mut headers: HeaderMap) -> HeaderMap {
 }
 
 fn should_forward(name: &HeaderName) -> bool {
-    !matches!(
-        name.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "te"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-            | "host"
-    )
+    !HOP_BY_HOP.contains(&name.as_str())
 }

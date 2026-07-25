@@ -2,9 +2,6 @@
 //!
 //! Agent → localhost (Maul) → real OpenAI-compatible base_url.
 
-mod config;
-mod proxy;
-
 use std::{sync::Arc, time::Duration};
 
 use axum::{
@@ -16,7 +13,8 @@ use reqwest::Client;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::Config;
+use maul::config::{self, Config};
+use maul::proxy;
 
 #[derive(Clone)]
 struct AppState {

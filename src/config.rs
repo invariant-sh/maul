@@ -3,13 +3,13 @@ use std::fs;
 
 const DEFAULT_PATH: &str = "maul.yaml";
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct Budget {
     pub max_llm_calls: u64,
     pub max_cost_usd: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 pub struct Config {
     pub proxy_listen: String,
     pub upstream_base_url: String,
