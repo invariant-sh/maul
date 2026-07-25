@@ -74,6 +74,13 @@ async fn forwards_request_filters_hop_by_hop_and_streams_body() {
     }
     assert!(got.headers.get("connection").is_none());
     assert_eq!(got.body, br#"{"model":"gpt-4o-mini"}"#.to_vec());
+    assert_eq!(
+        got.headers
+            .get("accept-encoding")
+            .map(|v| v.to_str().unwrap()),
+        Some("identity"),
+        "Maul must force identity so MutateAfter sees plaintext"
+    );
 }
 
 #[tokio::test]
@@ -130,6 +137,70 @@ async fn preserves_upstream_error_status() {
         .await
         .expect("body");
     assert_eq!(&body[..], br#"{"error":"unauthorized"}"#);
+}
+
+#[tokio::test]
+async fn overrides_client_gzip_accept_encoding_with_identity() {
+    let upstream = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"ok":true}"#, "application/json"),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("accept-encoding", "gzip, deflate, br")
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .expect("request");
+
+    let _ = reverse_proxy(&test_client(), &upstream.uri(), req).await;
+
+    let got = &upstream.received_requests().await.unwrap()[0];
+    assert_eq!(
+        got.headers
+            .get("accept-encoding")
+            .and_then(|v| v.to_str().ok()),
+        Some("identity")
+    );
+}
+
+#[tokio::test]
+async fn strips_content_encoding_from_proxied_response_headers() {
+    let upstream = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                // Use identity (not gzip+plaintext) so reqwest does not try to inflate.
+                .insert_header("content-encoding", "identity")
+                .set_body_raw(br#"{"data":[]}"#, "application/json"),
+        )
+        .mount(&upstream)
+        .await;
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/v1/models")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = reverse_proxy(&test_client(), &upstream.uri(), req).await;
+    assert!(
+        response.headers().get("content-encoding").is_none(),
+        "Maul must strip Content-Encoding after rebuilding/streaming the body"
+    );
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "application/json"
+    );
 }
 
 #[tokio::test]
