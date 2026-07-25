@@ -3,7 +3,10 @@
 mod headers;
 mod upstream;
 
-pub use headers::{HOP_BY_HOP, hop_by_hop_filter, strip_content_length};
+pub use headers::{
+    HOP_BY_HOP, hop_by_hop_filter, prepare_response_headers, prepare_upstream_request_headers,
+    strip_content_length,
+};
 pub use upstream::build_upstream_url;
 
 use std::sync::Arc;
@@ -17,11 +20,14 @@ use axum::{
 };
 use reqwest::Client;
 
-use crate::fault::{Action, FORCE_500, FaultEngine};
+use crate::fault::{Action, FaultEngine, malform_tool_call_json};
 use crate::report::ReportHandle;
 
 /// Hard cap for inbound request bodies (chat JSON is small; SSE lives on the response).
 pub const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Cap when buffering a response to apply MutateAfter (non-streaming JSON only for now).
+pub const MAX_MUTATE_BODY_BYTES: usize = 8 * 1024 * 1024;
 
 /// Shared handles needed to proxy + inject faults + record metrics.
 #[derive(Clone)]
@@ -32,7 +38,7 @@ pub struct ProxyState {
     pub report: ReportHandle,
 }
 
-/// Entry point for each agent request: maybe short-circuit, else forward upstream.
+/// Entry point for each agent request: maybe short-circuit, mutate-after, or forward.
 pub async fn handle(state: &ProxyState, req: Request) -> Response {
     let started = Instant::now();
     let path = req
@@ -42,13 +48,26 @@ pub async fn handle(state: &ProxyState, req: Request) -> Response {
         .unwrap_or_else(|| "/".to_owned());
 
     match state.fault.decide() {
-        Action::ShortCircuit(response) => {
+        Action::ShortCircuit { scenario, response } => {
             let status = response.status().as_u16();
             state.report.record_request(
                 path,
                 status,
                 started.elapsed().as_millis() as u64,
-                Some(FORCE_500.to_owned()),
+                Some(scenario.to_owned()),
+            );
+            response
+        }
+        Action::MutateAfter { scenario } => {
+            let upstream =
+                reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
+            let (response, injected) = apply_mutate_after(scenario, upstream).await;
+            let status = response.status().as_u16();
+            state.report.record_request(
+                path,
+                status,
+                started.elapsed().as_millis() as u64,
+                injected.map(str::to_owned),
             );
             response
         }
@@ -64,6 +83,54 @@ pub async fn handle(state: &ProxyState, req: Request) -> Response {
     }
 }
 
+/// Buffer the upstream body, corrupt tool_calls JSON when possible, rebuild the response.
+pub async fn apply_mutate_after(
+    scenario: &'static str,
+    response: Response,
+) -> (Response, Option<&'static str>) {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = match to_bytes(response.into_body(), MAX_MUTATE_BODY_BYTES).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(%error, scenario, "mutate-after: response body too large or failed");
+            return (
+                (
+                    StatusCode::BAD_GATEWAY,
+                    format!("maul: failed to buffer response for {scenario}"),
+                )
+                    .into_response(),
+                None,
+            );
+        }
+    };
+
+    match malform_tool_call_json(&body) {
+        Some(mutated) => {
+            tracing::warn!(scenario, "mutate-after: corrupted tool_call arguments");
+            let headers = prepare_response_headers(headers);
+            let mut out = Response::new(Body::from(mutated));
+            *out.status_mut() = status;
+            *out.headers_mut() = headers;
+            (out, Some(scenario))
+        }
+        None => {
+            let preview = String::from_utf8_lossy(&body);
+            let preview = preview.chars().take(80).collect::<String>();
+            tracing::warn!(
+                scenario,
+                body_preview = %preview,
+                "mutate-after: body not JSON/SSE; passing through"
+            );
+            let headers = prepare_response_headers(headers);
+            let mut out = Response::new(Body::from(body));
+            *out.status_mut() = status;
+            *out.headers_mut() = headers;
+            (out, None)
+        }
+    }
+}
+
 /// Forward an inbound request to the configured OpenAI-compatible upstream.
 pub async fn reverse_proxy(client: &Client, upstream_base_url: &str, req: Request) -> Response {
     let method = req.method().clone();
@@ -74,8 +141,8 @@ pub async fn reverse_proxy(client: &Client, upstream_base_url: &str, req: Reques
         .unwrap_or_else(|| "/".to_owned());
     let url = build_upstream_url(upstream_base_url, &path_and_query);
 
-    // Strip Content-Length: we rebuild the body bytes and let reqwest set framing.
-    let headers = strip_content_length(hop_by_hop_filter(req.headers().clone()));
+    // Force Accept-Encoding: identity so MutateAfter sees plaintext JSON/SSE.
+    let headers = prepare_upstream_request_headers(req.headers().clone());
     let body = req.into_body();
 
     tracing::debug!(%method, %url, "proxying request");
@@ -112,8 +179,7 @@ pub async fn reverse_proxy(client: &Client, upstream_base_url: &str, req: Reques
 
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
-    let response_headers =
-        strip_content_length(hop_by_hop_filter(upstream_response.headers().clone()));
+    let response_headers = prepare_response_headers(upstream_response.headers().clone());
     let response_body = Body::from_stream(upstream_response.bytes_stream());
 
     let mut response = Response::new(response_body);

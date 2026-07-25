@@ -37,6 +37,7 @@ It is **not** a production policy gateway. That role belongs to sibling products
 | Hop-by-hop header filtering | ✅ |
 | YAML config + seeded reproducibility | ✅ |
 | `force_500` short-circuit fault | ✅ |
+| `malformed_tool_call_json` (MutateAfter) | ✅ |
 | `reliability_report.json` on shutdown | ✅ |
 | Budget enforcement | 🚧 planned |
 | More fault scenarios | 🚧 planned |
@@ -125,12 +126,12 @@ See [`maul.example.yaml`](./maul.example.yaml).
 
 ## Roadmap
 
-1. **Report + budget atomics** — latency/calls now; score card on shutdown  
-2. **One end-to-end fault** — e.g. `force_500` (short-circuit) or `malformed_tool_call_json` (mutate-after)  
+1. ~~Report + budget atomics~~ / ~~`force_500`~~ / ~~`malformed_tool_call_json`~~ — done for v0.1 alpha  
+2. **Budget enforcement** — `max_llm_calls` / cost caps → short-circuit runaway loops  
 3. **Session correlation** — unlock real resilience scoring from subsequent traffic  
-4. **Scenario packs** — response mutation → short-circuit → experimental systemic faults  
+4. **Scenario packs** — more response mutation / short-circuit / experimental systemic faults  
 5. **Control plane + Python CLI** — `/__maul/run|report|reset` without process restarts  
-6. **OSS hardening** — tests (wiremock), CI, `SECURITY.md`, typed errors  
+6. **OSS hardening** — `SECURITY.md`, typed errors, richer score card
 
 Maul measures **behavior under failure**. Task correctness belongs in an eval harness (e.g. invariant-eval), not in the proxy.
 
@@ -162,12 +163,13 @@ CI runs the same checks on every push/PR to `main` (see `.github/workflows/ci.ym
 
 ```text
 tests/
-  headers.rs         # hop-by-hop filter + content-length
+  headers.rs         # hop-by-hop + Accept-Encoding:identity + Content-Encoding strip
   upstream.rs        # URL builder
   config.rs          # YAML load / error paths
-  fault.rs           # force_500 + seed/probability
+  fault.rs           # scenarios/seed + JSON/SSE/gzip mutator edge cases
+  mutate_after.rs    # handle/apply_mutate_after vs wiremock (gzip client, SSE, force_500)
   report.rs          # collector flush → JSON
-  reverse_proxy.rs   # end-to-end proxy vs wiremock
+  reverse_proxy.rs   # pass-through + identity encoding vs wiremock
 ```
 
 Production code stays in `src/` without embedded test modules. The crate is a **library + thin binary** so `tests/*` can call `maul::proxy` / `maul::config` like any other consumer.
@@ -184,6 +186,19 @@ cargo run
 ```
 
 Then curl the proxy — you should get HTTP 500 with body `maul: injected fault force_500` and, after Ctrl+C, a `reliability_report.json` in the working directory.
+
+### Demo `malformed_tool_call_json`
+
+```yaml
+scenarios: [malformed_tool_call_json]
+probability: 1.0
+seed: 42
+```
+
+Point a tool-calling agent (or the `python_test` demos) at Maul. Upstream still runs; Maul rewrites
+`tool_calls[].function.arguments` to invalid JSON (`{maul:not-json`) on the way back so the agent’s
+tool loop has to recover or fail. Works for non-streaming JSON **and** SSE (`text/event-stream`) —
+CrewAI/LangGraph often stream by default.
 
 ---
 

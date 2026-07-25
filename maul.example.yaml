@@ -15,10 +15,11 @@ upstream_base_url: "https://api.openai.com"
 
 # Active fault scenarios. Supported today:
 #   force_500 — ShortCircuit with HTTP 500 (never calls upstream)
+#   malformed_tool_call_json — MutateAfter: corrupt tool_calls[].function.arguments
 scenarios: []
 
 # Per-request probability of injecting an active scenario (0.0–1.0).
-# Use 1.0 with seed set to reliably demo force_500.
+# Use 1.0 with seed set to reliably demo a single scenario.
 probability: 0.0
 
 # Seed for reproducible chaos runs (same seed → same injection decisions).

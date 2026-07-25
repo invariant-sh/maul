@@ -1,4 +1,6 @@
-use reqwest::header::{CONTENT_LENGTH, HeaderMap, HeaderName};
+use reqwest::header::{
+    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue,
+};
 
 /// RFC 7230 hop-by-hop / connection-local names (lowercase, as `HeaderName::as_str`).
 pub const HOP_BY_HOP: &[&str] = &[
@@ -28,6 +30,25 @@ pub fn hop_by_hop_filter(headers: HeaderMap) -> HeaderMap {
 pub fn strip_content_length(mut headers: HeaderMap) -> HeaderMap {
     headers.remove(CONTENT_LENGTH);
     headers
+}
+
+/// Headers for the upstream request: filter hop-by-hop and force plaintext bodies.
+///
+/// Agents often send `Accept-Encoding: gzip`. If we forward that, OpenAI returns
+/// compressed bytes and MutateAfter cannot parse JSON/SSE. Maul is a test proxy,
+/// so we prefer identity encoding over saving bandwidth.
+pub fn prepare_upstream_request_headers(headers: HeaderMap) -> HeaderMap {
+    let mut out = strip_content_length(hop_by_hop_filter(headers));
+    out.remove(ACCEPT_ENCODING);
+    out.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    out
+}
+
+/// Headers for a response whose body we (re)built in memory.
+pub fn prepare_response_headers(headers: HeaderMap) -> HeaderMap {
+    let mut out = strip_content_length(hop_by_hop_filter(headers));
+    out.remove(CONTENT_ENCODING);
+    out
 }
 
 fn should_forward(name: &HeaderName) -> bool {
