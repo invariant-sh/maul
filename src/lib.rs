@@ -1,7 +1,6 @@
-//! Maul library surface — proxy, config, and (later) faults/budget/report.
-//!
-//! The binary (`main.rs`) is a thin boot wrapper around this crate so behavior
-//! stays unit- and integration-testable without spinning the full server.
+//! Maul library surface — proxy, config, faults, and reliability report.
 
 pub mod config;
+pub mod fault;
 pub mod proxy;
+pub mod report;

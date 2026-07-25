@@ -33,12 +33,13 @@ It is **not** a production policy gateway. That role belongs to sibling products
 | Capability | Status |
 |---|---|
 | OpenAI-compatible reverse proxy | ✅ |
-| Streaming (SSE) pass-through | ✅ |
+| Streaming response pass-through | ✅ |
 | Hop-by-hop header filtering | ✅ |
-| YAML config + seeded reproducibility | ✅ (seed wired for upcoming chaos) |
-| Fault scenarios | 🚧 planned |
-| Budget / cost safety | 🚧 planned |
-| `reliability_report.json` | 🚧 planned |
+| YAML config + seeded reproducibility | ✅ |
+| `force_500` short-circuit fault | ✅ |
+| `reliability_report.json` on shutdown | ✅ |
+| Budget enforcement | 🚧 planned |
+| More fault scenarios | 🚧 planned |
 | Control plane (`/__maul/*`) + Python CLI | 🚧 planned |
 
 ---
@@ -164,10 +165,25 @@ tests/
   headers.rs         # hop-by-hop filter + content-length
   upstream.rs        # URL builder
   config.rs          # YAML load / error paths
+  fault.rs           # force_500 + seed/probability
+  report.rs          # collector flush → JSON
   reverse_proxy.rs   # end-to-end proxy vs wiremock
 ```
 
 Production code stays in `src/` without embedded test modules. The crate is a **library + thin binary** so `tests/*` can call `maul::proxy` / `maul::config` like any other consumer.
+
+### Demo `force_500`
+
+```bash
+cp maul.example.yaml maul.yaml
+# set:
+#   scenarios: [force_500]
+#   probability: 1.0
+#   seed: 42
+cargo run
+```
+
+Then curl the proxy — you should get HTTP 500 with body `maul: injected fault force_500` and, after Ctrl+C, a `reliability_report.json` in the working directory.
 
 ---
 
@@ -185,7 +201,7 @@ Until the first tagged release, install from source: `cargo install --git https:
 
 ## License
 
-TBD — license file will be added before the first tagged release.
+Licensed under the [Apache License, Version 2.0](./LICENSE).
 
 ---
 

@@ -4,3 +4,6 @@
 
 # Local runtime config (copy from maul.example.yaml)
 maul.yaml
+
+# Generated on shutdown
+reliability_report.json

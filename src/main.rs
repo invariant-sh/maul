@@ -13,14 +13,10 @@ use reqwest::Client;
 use tokio::signal;
 use tracing_subscriber::EnvFilter;
 
-use maul::config::{self, Config};
-use maul::proxy;
-
-#[derive(Clone)]
-struct AppState {
-    client: reqwest::Client,
-    config: Arc<Config>,
-}
+use maul::config;
+use maul::fault::FaultEngine;
+use maul::proxy::{self, ProxyState};
+use maul::report;
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -72,20 +68,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .timeout(Duration::from_secs(60))
         .build()?;
 
-    let app_state = AppState {
+    let (report, collector) = report::spawn_collector("reliability_report.json");
+    let fault = Arc::new(FaultEngine::from_config(&config));
+
+    let state = ProxyState {
         client,
-        config: Arc::new(config),
+        upstream_base_url: Arc::new(config.upstream_base_url),
+        fault,
+        report: report.clone(),
     };
 
-    let app = Router::new().fallback(handler).with_state(app_state);
+    let app = Router::new().fallback(handler).with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
+
+    report.request_shutdown();
+    collector.await?;
     Ok(())
 }
 
-async fn handler(State(state): State<AppState>, req: Request) -> Response {
-    proxy::reverse_proxy(&state.client, &state.config.upstream_base_url, req).await
+async fn handler(State(state): State<ProxyState>, req: Request) -> Response {
+    proxy::handle(&state, req).await
 }

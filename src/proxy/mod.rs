@@ -6,6 +6,9 @@ mod upstream;
 pub use headers::{HOP_BY_HOP, hop_by_hop_filter, strip_content_length};
 pub use upstream::build_upstream_url;
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use axum::{
     body::{Body, to_bytes},
     extract::Request,
@@ -14,8 +17,52 @@ use axum::{
 };
 use reqwest::Client;
 
+use crate::fault::{Action, FORCE_500, FaultEngine};
+use crate::report::ReportHandle;
+
 /// Hard cap for inbound request bodies (chat JSON is small; SSE lives on the response).
 pub const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+
+/// Shared handles needed to proxy + inject faults + record metrics.
+#[derive(Clone)]
+pub struct ProxyState {
+    pub client: Client,
+    pub upstream_base_url: Arc<String>,
+    pub fault: Arc<FaultEngine>,
+    pub report: ReportHandle,
+}
+
+/// Entry point for each agent request: maybe short-circuit, else forward upstream.
+pub async fn handle(state: &ProxyState, req: Request) -> Response {
+    let started = Instant::now();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_owned())
+        .unwrap_or_else(|| "/".to_owned());
+
+    match state.fault.decide() {
+        Action::ShortCircuit(response) => {
+            let status = response.status().as_u16();
+            state.report.record_request(
+                path,
+                status,
+                started.elapsed().as_millis() as u64,
+                Some(FORCE_500.to_owned()),
+            );
+            response
+        }
+        Action::Forward => {
+            let response =
+                reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
+            let status = response.status().as_u16();
+            state
+                .report
+                .record_request(path, status, started.elapsed().as_millis() as u64, None);
+            response
+        }
+    }
+}
 
 /// Forward an inbound request to the configured OpenAI-compatible upstream.
 pub async fn reverse_proxy(client: &Client, upstream_base_url: &str, req: Request) -> Response {
