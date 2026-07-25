@@ -28,7 +28,7 @@ It is **not** a production policy gateway. That role belongs to sibling products
 
 ## Status
 
-**Early v0.1** — streaming pass-through proxy works today. Fault injection, budgets, scoring, and the control plane are on the roadmap.
+**Early v0.1** — OpenAI-compatible reverse proxy with seeded fault injection and a shutdown reliability report. Budgets, richer scoring, and a control plane are on the roadmap.
 
 | Capability | Status |
 |---|---|
@@ -100,8 +100,8 @@ Same idea in TypeScript, LangChain, LiteLLM, etc.: point `base_url` at Maul.
 
 1. Agent calls Maul as if it were the provider.
 2. Maul forwards method, path, headers (minus hop-by-hop), and body to the real upstream.
-3. Responses stream back unchanged (today).
-4. Later: Maul may short-circuit, mutate responses, or poison inbound tool results per `maul.yaml` scenarios — then record behavior into a score card.
+3. Depending on `maul.yaml`, Maul may short-circuit, mutate the response (e.g. malformed tool-call JSON), or pass through unchanged — including streamed SSE.
+4. Metrics land in `reliability_report.json` on shutdown.
 
 **Important boundary:** Maul sees traffic on the LLM `base_url`. It does not sit on tool HTTP by default. Tool-result poisoning targets `role: "tool"` messages in the chat request; mutating `tool_calls` targets the LLM response.
 
@@ -117,7 +117,7 @@ See [`maul.example.yaml`](./maul.example.yaml).
 |---|---|
 | `proxy_listen` | Bind address (default `0.0.0.0:7777`) |
 | `upstream_base_url` | Real provider / gateway |
-| `scenarios` | Faults to enable (when implemented) |
+| `scenarios` | Active fault scenarios (e.g. `force_500`, `malformed_tool_call_json`) |
 | `probability` | Per-request injection chance |
 | `seed` | Reproducible chaos (same seed → same decisions) |
 | `budget` | Call / cost caps (when enforced) |
@@ -131,25 +131,25 @@ See [`maul.example.yaml`](./maul.example.yaml).
 3. **Session correlation** — unlock real resilience scoring from subsequent traffic  
 4. **Scenario packs** — more response mutation / short-circuit / experimental systemic faults  
 5. **Control plane + Python CLI** — `/__maul/run|report|reset` without process restarts  
-6. **OSS hardening** — `SECURITY.md`, typed errors, richer score card
+6. **OSS hardening** — typed errors, richer score card
 
-Maul measures **behavior under failure**. Task correctness belongs in an eval harness (e.g. invariant-eval), not in the proxy.
+Maul measures **behavior under failure**. Task correctness belongs in **Holds** (eval harness), not in the proxy.
 
 ---
 
 ## Security
 
 - Treat Maul as a **local / CI chaos tool**, not a public edge proxy.
-- Never log `Authorization` or bodies that may contain secrets.
+- Maul **forwards** `Authorization`; **never log** that header (or bodies that may contain secrets).
 - Keep real keys in the environment; do not commit `maul.yaml` with sensitive overrides.
 
-A full `SECURITY.md` will land with the OSS quality pass.
+See [`SECURITY.md`](./SECURITY.md) for the full policy and how to report vulnerabilities.
 
 ---
 
 ## Contributing
 
-Issues and PRs welcome once the fault-injection path is scaffolded. Prefer small, reviewable changes that keep `main` boring and logic in modules (`proxy/`, `fault/`, `budget`, `report`).
+Issues and PRs welcome. Prefer small, reviewable changes that keep `main` boring and logic in modules (`proxy/`, `fault/`, `budget`, `report`).
 
 ```bash
 cargo fmt
@@ -185,7 +185,27 @@ cp maul.example.yaml maul.yaml
 cargo run
 ```
 
-Then curl the proxy — you should get HTTP 500 with body `maul: injected fault force_500` and, after Ctrl+C, a `reliability_report.json` in the working directory.
+In another terminal:
+
+```bash
+curl -sS http://127.0.0.1:7777/v1/chat/completions \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+```
+
+**What you should see**
+
+```text
+# Maul log
+WARN maul::fault: injecting fault scenario="force_500" ...
+
+# curl
+HTTP/1.1 500 Internal Server Error
+maul: injected fault force_500
+```
+
+After Ctrl+C on Maul, `reliability_report.json` should show `faults_injected >= 1`.
 
 ### Demo `malformed_tool_call_json`
 
@@ -210,7 +230,7 @@ CrewAI/LangGraph often stream by default.
 | **crates.io** | Rust library/binary registry (“packages”) | Later, once LICENSE + API are stable |
 | **GitHub Packages** | GH’s generic package host | Usually skip for Rust CLIs |
 
-Until the first tagged release, install from source: `cargo install --git https://github.com/invariant-sh/maul.git`.
+Until a stable tagged release is published, install from source: `cargo install --git https://github.com/invariant-sh/maul.git`.
 
 ---
 
@@ -222,4 +242,12 @@ Licensed under the [Apache License, Version 2.0](./LICENSE).
 
 ## Related
 
-Part of the [Invariant](https://github.com/invariant-sh) tooling family for trustworthy agent systems: adversarial testing (Maul), production controls (Vigil), and task evaluation (invariant-eval).
+Part of the [Invariant](https://github.com/invariant-sh) tooling family for trustworthy agent systems:
+
+| Tool | Role |
+|---|---|
+| **Maul** (this repo) | Adversarial proxy — prove resilience under failure |
+| **Holds** | Task / eval harness — did the agent solve the job? |
+| **Vigil** | Production controls — enforce policy at the edge |
+
+Install from source: `cargo install --git https://github.com/invariant-sh/maul.git`.
