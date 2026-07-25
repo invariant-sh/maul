@@ -155,6 +155,20 @@ cargo clippy -- -D warnings
 cargo test
 ```
 
+CI runs the same checks on every push/PR to `main` (see `.github/workflows/ci.yml`).
+
+---
+
+## Releases & packages
+
+| Channel | What it is | For Maul |
+|---|---|---|
+| **GitHub Releases** | Version tags + notes (+ optional binaries) | Primary distribution for the `maul` binary |
+| **crates.io** | Rust library/binary registry (“packages”) | Later, once LICENSE + API are stable |
+| **GitHub Packages** | GH’s generic package host | Usually skip for Rust CLIs |
+
+Until the first tagged release, install from source: `cargo install --git https://github.com/invariant-sh/maul.git`.
+
 ---
 
 ## License

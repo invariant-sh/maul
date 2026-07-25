@@ -57,7 +57,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("starting maul");
 
     let config = config::load_default()?;
-    tracing::info!("config loaded");
+    tracing::info!(
+        seed = config.seed,
+        probability = config.probability,
+        scenarios = ?config.scenarios,
+        max_llm_calls = config.budget.max_llm_calls,
+        max_cost_usd = config.budget.max_cost_usd,
+        "config loaded"
+    );
 
     let listen_addr = config.proxy_listen.clone();
     tracing::info!(%listen_addr, "listening");
@@ -72,9 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config: Arc::new(config),
     };
 
-    let app = Router::new()
-        .fallback(handler)
-        .with_state(app_state);
+    let app = Router::new().fallback(handler).with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&listen_addr).await?;
     axum::serve(listener, app)
