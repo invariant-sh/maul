@@ -7,13 +7,23 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use maul::budget::{BudgetLimits, BudgetTracker, MicroUsd};
 use maul::config::{Budget, Config};
-use maul::fault::{FORCE_429, FaultEngine};
+use maul::fault::{FORCE_429, FaultEngine, MALFORMED_TOOL_CALL_JSON};
 use maul::pricing::PricingRegistry;
 use maul::proxy::{ProxyState, handle};
-use maul::report::spawn_collector;
+use maul::report::{BudgetDecision, ReliabilityReport, spawn_collector};
+use maul::usage::{UsageOutcome, UsageUnavailableReason};
 use reqwest::Client;
+use tempfile::{TempDir, tempdir};
+use tokio::task::JoinHandle;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+
+struct PipelineFixture {
+    state: ProxyState,
+    _tempdir: TempDir,
+    report_path: std::path::PathBuf,
+    collector: JoinHandle<()>,
+}
 
 fn state(
     upstream: &str,
@@ -21,6 +31,15 @@ fn state(
     max_llm_calls: u64,
     max_cost_usd: u64,
 ) -> ProxyState {
+    fixture(upstream, scenarios, max_llm_calls, max_cost_usd).state
+}
+
+fn fixture(
+    upstream: &str,
+    scenarios: Vec<&str>,
+    max_llm_calls: u64,
+    max_cost_usd: u64,
+) -> PipelineFixture {
     let config = Config {
         proxy_listen: "127.0.0.1:7777".into(),
         upstream_base_url: upstream.into(),
@@ -33,9 +52,10 @@ fn state(
         },
         model_prices: std::collections::HashMap::new(),
     };
-    let (report, _collector) =
-        spawn_collector(std::env::temp_dir().join("maul_pipeline_test_report.json"));
-    ProxyState {
+    let tempdir = tempdir().expect("tempdir");
+    let report_path = tempdir.path().join("reliability_report.json");
+    let (report, collector) = spawn_collector(report_path.clone());
+    let state = ProxyState {
         client: Client::builder()
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(5))
@@ -49,16 +69,40 @@ fn state(
         }),
         pricing: PricingRegistry::with_overrides(&config.model_prices),
         report,
+    };
+    PipelineFixture {
+        state,
+        _tempdir: tempdir,
+        report_path,
+        collector,
     }
 }
 
+async fn flush_report(fixture: PipelineFixture) -> ReliabilityReport {
+    let snapshot = fixture.state.budget.snapshot();
+    fixture
+        .state
+        .report
+        .request_shutdown_with_metadata(snapshot, "test");
+    tokio::time::timeout(Duration::from_secs(2), fixture.collector)
+        .await
+        .expect("collector finished")
+        .expect("collector join");
+    let raw = std::fs::read_to_string(&fixture.report_path).expect("report file");
+    serde_json::from_str(&raw).expect("report json")
+}
+
 fn completion_request(stream: bool) -> Request<Body> {
+    completion_request_for_model("gpt-4o-mini", stream)
+}
+
+fn completion_request_for_model(model: &str, stream: bool) -> Request<Body> {
     Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
         .header("content-type", "application/json")
         .body(Body::from(format!(
-            r#"{{"model":"gpt-4o-mini","stream":{stream}}}"#
+            r#"{{"model":"{model}","stream":{stream}}}"#
         )))
         .expect("request")
 }
@@ -248,4 +292,111 @@ async fn force_429_consumes_call_without_contacting_upstream() {
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["error"]["code"], FORCE_429);
     assert_eq!(state.budget.snapshot().calls_reserved, 1);
+}
+
+#[tokio::test]
+async fn unpriced_model_is_rejected_before_admission() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+    let fixture = fixture(&upstream.uri(), vec![], 10, 1_000);
+
+    let response = handle(
+        &fixture.state,
+        completion_request_for_model("totally-unknown-model", false),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], "model_unpriced");
+    assert_eq!(fixture.state.budget.snapshot().calls_reserved, 0);
+
+    let report = flush_report(fixture).await;
+    assert_eq!(report.requests.len(), 1);
+    assert_eq!(
+        report.requests[0].budget_decision,
+        BudgetDecision::ModelUnpriced
+    );
+    assert!(report.requests[0].call_number.is_none());
+}
+
+#[tokio::test]
+async fn streaming_upstream_error_still_emits_one_report_event() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(502).set_body_raw(
+            br#"{"error":{"message":"upstream boom","type":"server_error"}}"#,
+            "application/json",
+        ))
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let fixture = fixture(&upstream.uri(), vec![], 10, 0);
+
+    let response = handle(&fixture.state, completion_request(true)).await;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let _ = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(fixture.state.budget.snapshot().calls_reserved, 1);
+
+    let report = flush_report(fixture).await;
+    assert_eq!(report.requests.len(), 1);
+    assert_eq!(report.requests[0].call_number, Some(1));
+    assert_eq!(
+        report.requests[0].usage,
+        Some(UsageOutcome::Unavailable(
+            UsageUnavailableReason::UpstreamError
+        ))
+    );
+    assert!(report.budget_snapshot.is_some());
+    assert_eq!(report.budget_snapshot.unwrap().calls_reserved, 1);
+}
+
+#[tokio::test]
+async fn mutate_after_streaming_records_pristine_usage_and_cost() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":null}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":0,\"total_tokens\":4}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let fixture = fixture(&upstream.uri(), vec![MALFORMED_TOOL_CALL_JSON], 10, 0);
+
+    let response = handle(&fixture.state, completion_request(true)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(
+        fixture.state.budget.snapshot().observed_cost_usd,
+        MicroUsd::from_micro_usd(1)
+    );
+
+    let report = flush_report(fixture).await;
+    assert_eq!(report.requests.len(), 1);
+    assert!(matches!(
+        report.requests[0].usage,
+        Some(UsageOutcome::Metered(_))
+    ));
+    assert_eq!(
+        report.requests[0].cost_usd,
+        Some(MicroUsd::from_micro_usd(1))
+    );
+    assert_eq!(
+        report.requests[0].fault_injected.as_deref(),
+        Some(MALFORMED_TOOL_CALL_JSON)
+    );
 }

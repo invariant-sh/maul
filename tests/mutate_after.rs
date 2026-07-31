@@ -111,7 +111,6 @@ async fn mutate_after_corrupts_tool_call_arguments() {
         .unwrap();
     assert_eq!(args, "{maul:not-json");
     assert!(serde_json::from_str::<serde_json::Value>(args).is_err());
-    assert_eq!(state.report.faults_injected(), 1);
 }
 
 #[tokio::test]
@@ -149,7 +148,6 @@ async fn mutate_after_despite_client_accept_encoding_gzip() {
         text.contains("{maul:not-json"),
         "expected mutation with gzip Accept-Encoding from client, got: {text}"
     );
-    assert_eq!(state.report.faults_injected(), 1);
 
     let received = upstream.received_requests().await.unwrap();
     assert_eq!(
@@ -202,7 +200,6 @@ async fn mutate_after_corrupts_sse_tool_call_arguments() {
         text.contains("{maul:not-json"),
         "expected malformed args in sse, got: {text}"
     );
-    assert_eq!(state.report.faults_injected(), 1);
 }
 
 #[tokio::test]
@@ -236,7 +233,6 @@ async fn mutate_after_sse_text_only_forces_fault_tool_call() {
     let text = String::from_utf8_lossy(&body);
     assert!(text.contains("maul_injected_tool"));
     assert!(text.contains("{maul:not-json"));
-    assert_eq!(state.report.faults_injected(), 1);
 }
 
 #[tokio::test]
@@ -313,7 +309,6 @@ async fn forward_does_not_mutate() {
         "body was mutated unexpectedly: {}",
         String::from_utf8_lossy(&body)
     );
-    assert_eq!(state.report.faults_injected(), 0);
 }
 
 #[tokio::test]
@@ -336,5 +331,4 @@ async fn force_500_short_circuits_without_upstream() {
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let body = to_bytes(response.into_body(), 1024).await.unwrap();
     assert!(String::from_utf8_lossy(&body).contains("force_500"));
-    assert_eq!(state.report.faults_injected(), 1);
 }

@@ -1,8 +1,6 @@
 //! Reliability report collector (actor): events in, JSON out on shutdown.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -37,14 +35,94 @@ pub enum ReportEvent {
 }
 
 /// Cheap cloneable handle shared via `AppState`.
+///
+/// Counters are derived at flush from collected records — not mirrored live.
 #[derive(Clone)]
 pub struct ReportHandle {
     tx: mpsc::UnboundedSender<ReportEvent>,
-    total_calls: Arc<AtomicU64>,
-    faults_injected: Arc<AtomicU64>,
+}
+
+/// Fields collected for one proxy observation before they become a `RequestRecord`.
+#[derive(Debug, Clone)]
+pub struct RequestObservation {
+    pub path: String,
+    pub status: u16,
+    pub latency_ms: u64,
+    pub fault_injected: Option<String>,
+    pub billable: bool,
+    pub model: Option<String>,
+    pub call_number: Option<u64>,
+    pub budget_decision: BudgetDecision,
+    pub usage: Option<UsageOutcome>,
+    pub cost_usd: Option<MicroUsd>,
+}
+
+impl RequestObservation {
+    pub fn non_billable(
+        path: impl Into<String>,
+        status: u16,
+        latency_ms: u64,
+        fault_injected: Option<String>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            status,
+            latency_ms,
+            fault_injected,
+            billable: false,
+            model: None,
+            call_number: None,
+            budget_decision: BudgetDecision::NotBillable,
+            usage: None,
+            cost_usd: None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn billable(
+        path: impl Into<String>,
+        status: u16,
+        latency_ms: u64,
+        fault_injected: Option<String>,
+        model: Option<String>,
+        call_number: Option<u64>,
+        budget_decision: BudgetDecision,
+        usage: Option<UsageOutcome>,
+        cost_usd: Option<MicroUsd>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            status,
+            latency_ms,
+            fault_injected,
+            billable: true,
+            model,
+            call_number,
+            budget_decision,
+            usage,
+            cost_usd,
+        }
+    }
 }
 
 impl ReportHandle {
+    pub fn record(&self, observation: RequestObservation) {
+        let _ = self.tx.send(ReportEvent::Request {
+            record: RequestRecord {
+                path: observation.path,
+                status: observation.status,
+                latency_ms: observation.latency_ms,
+                fault_injected: observation.fault_injected,
+                billable: observation.billable,
+                model: observation.model,
+                call_number: observation.call_number,
+                budget_decision: observation.budget_decision,
+                usage: observation.usage,
+                cost_usd: observation.cost_usd,
+            },
+        });
+    }
+
     pub fn record_request(
         &self,
         path: impl Into<String>,
@@ -52,18 +130,12 @@ impl ReportHandle {
         latency_ms: u64,
         fault_injected: Option<String>,
     ) {
-        self.record_request_details(
+        self.record(RequestObservation::non_billable(
             path,
             status,
             latency_ms,
             fault_injected,
-            false,
-            None,
-            None,
-            BudgetDecision::NotBillable,
-            None,
-            None,
-        );
+        ));
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -80,24 +152,22 @@ impl ReportHandle {
         usage: Option<UsageOutcome>,
         cost_usd: Option<MicroUsd>,
     ) {
-        self.total_calls.fetch_add(1, Ordering::Relaxed);
-        if fault_injected.is_some() {
-            self.faults_injected.fetch_add(1, Ordering::Relaxed);
-        }
-        let _ = self.tx.send(ReportEvent::Request {
-            record: RequestRecord {
-                path: path.into(),
+        let observation = if billable {
+            RequestObservation::billable(
+                path,
                 status,
                 latency_ms,
                 fault_injected,
-                billable,
                 model,
                 call_number,
                 budget_decision,
                 usage,
                 cost_usd,
-            },
-        });
+            )
+        } else {
+            RequestObservation::non_billable(path, status, latency_ms, fault_injected)
+        };
+        self.record(observation);
     }
 
     pub fn request_shutdown(&self) {
@@ -124,14 +194,6 @@ impl ReportHandle {
             budget_snapshot,
             pricing_registry_version,
         });
-    }
-
-    pub fn total_calls(&self) -> u64 {
-        self.total_calls.load(Ordering::Relaxed)
-    }
-
-    pub fn faults_injected(&self) -> u64 {
-        self.faults_injected.load(Ordering::Relaxed)
     }
 }
 
@@ -209,19 +271,10 @@ pub fn summarize(requests: &[RequestRecord]) -> RunSummary {
 pub fn spawn_collector(output_path: impl Into<PathBuf>) -> (ReportHandle, JoinHandle<()>) {
     let output_path = output_path.into();
     let (tx, rx) = mpsc::unbounded_channel();
-    let total_calls = Arc::new(AtomicU64::new(0));
-    let faults_injected = Arc::new(AtomicU64::new(0));
-
-    let handle = ReportHandle {
-        tx,
-        total_calls: Arc::clone(&total_calls),
-        faults_injected: Arc::clone(&faults_injected),
-    };
-
+    let handle = ReportHandle { tx };
     let join = tokio::spawn(async move {
         run_collector(rx, output_path).await;
     });
-
     (handle, join)
 }
 

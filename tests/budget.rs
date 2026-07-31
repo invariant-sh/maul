@@ -118,6 +118,30 @@ fn committed_cost_saturates_instead_of_wrapping() {
 }
 
 #[test]
+fn concurrent_cost_commits_may_overshoot_the_configured_limit() {
+    // Cost admission is checked against observed spend before each reservation.
+    // Concurrent in-flight responses may still commit past the limit — that
+    // overshoot is intentional and documented.
+    let budget = Arc::new(tracker(100, 100));
+    for _ in 0..10 {
+        assert!(matches!(budget.admit(), BudgetAdmission::Allowed(_)));
+    }
+
+    thread::scope(|scope| {
+        for _ in 0..10 {
+            let budget = Arc::clone(&budget);
+            scope.spawn(move || {
+                budget.commit_cost(MicroUsd::from_micro_usd(60));
+            });
+        }
+    });
+
+    let observed = budget.snapshot().observed_cost_usd.as_u64();
+    assert!(observed > 100, "expected overshoot, got {observed}");
+    assert_eq!(observed, 600);
+}
+
+#[test]
 fn price_calculation_reports_overflow() {
     let price = Price::new(
         MicroUsd::from_micro_usd(u64::MAX),

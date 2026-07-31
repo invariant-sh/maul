@@ -153,3 +153,35 @@ async fn sse_tap_reports_interrupted_streams() {
         ))
     );
 }
+
+#[tokio::test]
+async fn sse_tap_drop_flushes_interrupted_completion() {
+    let observed = Arc::new(Mutex::new(None));
+    let callback_observed = Arc::clone(&observed);
+    let completion: UsageCompletion = Box::new(move |outcome, _cost| {
+        *callback_observed.lock().expect("callback lock") = Some(outcome);
+    });
+    let budget = BudgetTracker::new(BudgetLimits {
+        max_llm_calls: 1,
+        max_cost_usd: MicroUsd::ZERO,
+    });
+    let stream = stream::pending::<Result<Bytes, &'static str>>();
+    let tap = SseUsageTap::with_completion(
+        stream,
+        budget,
+        Some(Price::new(
+            MicroUsd::from_micro_usd(1),
+            MicroUsd::from_micro_usd(1),
+        )),
+        Some(completion),
+    );
+
+    drop(tap);
+
+    assert_eq!(
+        observed.lock().expect("test lock").as_ref(),
+        Some(&UsageOutcome::Unavailable(
+            UsageUnavailableReason::StreamInterrupted
+        ))
+    );
+}

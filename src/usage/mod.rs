@@ -15,6 +15,8 @@ pub enum UsageUnavailableReason {
     MalformedSse,
     ResponseTooLarge,
     StreamInterrupted,
+    /// Upstream returned a non-success status; no usage body to meter.
+    UpstreamError,
 }
 
 #[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]

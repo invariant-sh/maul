@@ -1,6 +1,7 @@
 //! Pass-through reverse proxy: bounded request body + streamed upstream response.
 
 mod headers;
+mod pipeline;
 pub mod request_transform;
 mod upstream;
 
@@ -20,17 +21,16 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use reqwest::Client;
-use serde_json::Value;
 
 use crate::report::ReportHandle;
 use crate::{
-    budget::{BudgetAdmission, BudgetTracker, MicroUsd, Price},
-    fault::{Action, FaultEngine, malform_tool_call_json},
-    openai::{ChatRequestMetadata, OpenAiErrorEnvelope, classify_billable_route},
+    budget::{BudgetTracker, MicroUsd, Price},
+    fault::{FaultEngine, malform_tool_call_json},
+    openai::{OpenAiErrorEnvelope, classify_billable_route},
     pricing::PricingRegistry,
-    report::BudgetDecision,
+    report::{BudgetDecision, RequestObservation},
     usage::{
-        UsageOutcome,
+        UsageOutcome, UsageUnavailableReason,
         json::extract_usage,
         sse::{SseUsageTap, UsageCompletion},
     },
@@ -68,302 +68,7 @@ pub async fn handle(state: &ProxyState, req: Request) -> Response {
         return response;
     }
 
-    handle_billable(state, req, path, started).await
-}
-
-async fn handle_billable(
-    state: &ProxyState,
-    req: Request,
-    path: String,
-    started: Instant,
-) -> Response {
-    let (parts, body) = req.into_parts();
-    let body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
-        Ok(body) => body,
-        Err(error) => {
-            tracing::warn!(%error, "request body exceeds limit or failed to read");
-            let response = OpenAiErrorEnvelope::new(
-                "maul: request body exceeds configured limit",
-                "invalid_request_error",
-                "request_body_too_large",
-            )
-            .into_response(StatusCode::PAYLOAD_TOO_LARGE);
-            record_billable(
-                state,
-                path,
-                started,
-                response.status().as_u16(),
-                None,
-                None,
-                None,
-                BudgetDecision::InvalidRequest,
-                None,
-                None,
-            );
-            return response;
-        }
-    };
-
-    let mut value = match serde_json::from_slice::<Value>(&body) {
-        Ok(value) => value,
-        Err(error) => {
-            tracing::debug!(%error, "billable request body is not JSON");
-            let response = OpenAiErrorEnvelope::new(
-                "maul: chat completion request must be valid JSON",
-                "invalid_request_error",
-                "invalid_json",
-            )
-            .into_response(StatusCode::BAD_REQUEST);
-            record_billable(
-                state,
-                path,
-                started,
-                response.status().as_u16(),
-                None,
-                None,
-                None,
-                BudgetDecision::InvalidRequest,
-                None,
-                None,
-            );
-            return response;
-        }
-    };
-    let metadata = match ChatRequestMetadata::try_from(&value) {
-        Ok(metadata) => metadata,
-        Err(error) => {
-            let response = OpenAiErrorEnvelope::new(
-                error.to_string(),
-                "invalid_request_error",
-                "invalid_chat_request",
-            )
-            .into_response(StatusCode::BAD_REQUEST);
-            record_billable(
-                state,
-                path,
-                started,
-                response.status().as_u16(),
-                None,
-                None,
-                None,
-                BudgetDecision::InvalidRequest,
-                None,
-                None,
-            );
-            return response;
-        }
-    };
-
-    let price = state.pricing.lookup(metadata.model.as_str());
-    if state.budget.snapshot().cost_limit_usd != crate::budget::MicroUsd::ZERO && price.is_none() {
-        let response = OpenAiErrorEnvelope::new(
-            format!(
-                "maul: no price configured for model `{}`",
-                metadata.model.as_str()
-            ),
-            "invalid_request_error",
-            "model_unpriced",
-        )
-        .into_response(StatusCode::UNPROCESSABLE_ENTITY);
-        record_billable(
-            state,
-            path,
-            started,
-            response.status().as_u16(),
-            None,
-            Some(metadata.model.as_str().to_owned()),
-            None,
-            BudgetDecision::ModelUnpriced,
-            None,
-            None,
-        );
-        return response;
-    }
-
-    let permit = match state.budget.admit() {
-        BudgetAdmission::Allowed(permit) => permit,
-        BudgetAdmission::CallCapExceeded { .. } => {
-            let response = OpenAiErrorEnvelope::new(
-                "maul: max_llm_calls budget exceeded",
-                "maul_budget_error",
-                "max_llm_calls",
-            )
-            .into_response(StatusCode::TOO_MANY_REQUESTS);
-            record_billable(
-                state,
-                path,
-                started,
-                response.status().as_u16(),
-                Some("budget_exceeded".to_owned()),
-                Some(metadata.model.as_str().to_owned()),
-                None,
-                BudgetDecision::CallCapExceeded,
-                None,
-                None,
-            );
-            return response;
-        }
-        BudgetAdmission::CostCapExceeded { .. } => {
-            let response = OpenAiErrorEnvelope::new(
-                "maul: max_cost_usd budget exceeded",
-                "maul_budget_error",
-                "max_cost_usd",
-            )
-            .into_response(StatusCode::TOO_MANY_REQUESTS);
-            record_billable(
-                state,
-                path,
-                started,
-                response.status().as_u16(),
-                Some("budget_exceeded".to_owned()),
-                Some(metadata.model.as_str().to_owned()),
-                None,
-                BudgetDecision::CostCapExceeded,
-                None,
-                None,
-            );
-            return response;
-        }
-    };
-    tracing::debug!(
-        call_number = permit.call_number,
-        "billable request admitted"
-    );
-
-    if let Err(error) = request_transform::include_stream_usage(&mut value) {
-        let response = OpenAiErrorEnvelope::new(
-            error.to_string(),
-            "invalid_request_error",
-            "invalid_stream_options",
-        )
-        .into_response(StatusCode::BAD_REQUEST);
-        record_billable(
-            state,
-            path,
-            started,
-            response.status().as_u16(),
-            None,
-            Some(metadata.model.as_str().to_owned()),
-            Some(permit.call_number),
-            BudgetDecision::Allowed,
-            None,
-            None,
-        );
-        return response;
-    }
-    let body = match serde_json::to_vec(&value) {
-        Ok(body) => body,
-        Err(error) => {
-            tracing::error!(%error, "failed to serialize transformed request");
-            let response = OpenAiErrorEnvelope::new(
-                "maul: failed to serialize transformed request",
-                "server_error",
-                "request_transform_failed",
-            )
-            .into_response(StatusCode::INTERNAL_SERVER_ERROR);
-            record_billable(
-                state,
-                path,
-                started,
-                response.status().as_u16(),
-                None,
-                Some(metadata.model.as_str().to_owned()),
-                Some(permit.call_number),
-                BudgetDecision::Allowed,
-                None,
-                None,
-            );
-            return response;
-        }
-    };
-    let req = Request::from_parts(parts, Body::from(body));
-
-    match state.fault.decide() {
-        Action::ShortCircuit { scenario, response } => {
-            record_billable(
-                state,
-                path,
-                started,
-                response.status().as_u16(),
-                Some(scenario.to_owned()),
-                Some(metadata.model.as_str().to_owned()),
-                Some(permit.call_number),
-                BudgetDecision::Allowed,
-                None,
-                None,
-            );
-            response
-        }
-        Action::MutateAfter { scenario } => {
-            let upstream =
-                reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
-            let metered =
-                meter_response(upstream, metadata.stream, state.budget.clone(), price, None).await;
-            let (response, injected) = apply_mutate_after(scenario, metered.response).await;
-            record_billable(
-                state,
-                path,
-                started,
-                response.status().as_u16(),
-                injected.map(str::to_owned),
-                Some(metadata.model.as_str().to_owned()),
-                Some(permit.call_number),
-                BudgetDecision::Allowed,
-                metered.usage,
-                metered.cost_usd,
-            );
-            response
-        }
-        Action::Forward => {
-            let response =
-                reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
-            if metadata.stream {
-                let status = response.status().as_u16();
-                let report = state.report.clone();
-                let report_path = path.clone();
-                let report_model = metadata.model.as_str().to_owned();
-                let call_number = permit.call_number;
-                let started_for_report = started;
-                let completion: UsageCompletion = Box::new(move |usage, cost_usd| {
-                    report.record_request_details(
-                        report_path,
-                        status,
-                        started_for_report.elapsed().as_millis() as u64,
-                        None,
-                        true,
-                        Some(report_model),
-                        Some(call_number),
-                        BudgetDecision::Allowed,
-                        Some(usage),
-                        cost_usd,
-                    );
-                });
-                return meter_response(
-                    response,
-                    true,
-                    state.budget.clone(),
-                    price,
-                    Some(completion),
-                )
-                .await
-                .response;
-            }
-            let metered = meter_response(response, false, state.budget.clone(), price, None).await;
-            record_billable(
-                state,
-                path,
-                started,
-                metered.response.status().as_u16(),
-                None,
-                Some(metadata.model.as_str().to_owned()),
-                Some(permit.call_number),
-                BudgetDecision::Allowed,
-                metered.usage,
-                metered.cost_usd,
-            );
-            metered.response
-        }
-    }
+    pipeline::handle_billable(state, req, path, started).await
 }
 
 fn record_request(
@@ -379,7 +84,7 @@ fn record_request(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_billable(
+pub(crate) fn record_billable(
     state: &ProxyState,
     path: String,
     started: Instant,
@@ -391,27 +96,26 @@ fn record_billable(
     usage: Option<UsageOutcome>,
     cost_usd: Option<MicroUsd>,
 ) {
-    state.report.record_request_details(
+    state.report.record(RequestObservation::billable(
         path,
         status,
         started.elapsed().as_millis() as u64,
         fault,
-        true,
         model,
         call_number,
         budget_decision,
         usage,
         cost_usd,
-    );
+    ));
 }
 
-struct MeteredResponse {
-    response: Response,
-    usage: Option<UsageOutcome>,
-    cost_usd: Option<MicroUsd>,
+pub(crate) struct MeteredResponse {
+    pub response: Response,
+    pub usage: Option<UsageOutcome>,
+    pub cost_usd: Option<MicroUsd>,
 }
 
-async fn meter_response(
+pub(crate) async fn meter_response(
     response: Response,
     stream: bool,
     budget: BudgetTracker,
@@ -433,9 +137,18 @@ async fn meter_response(
         };
     };
     if !response.status().is_success() {
+        // Streaming Forward records only via completion — always fire it once.
+        if let Some(completion) = completion {
+            completion(
+                UsageOutcome::Unavailable(UsageUnavailableReason::UpstreamError),
+                None,
+            );
+        }
         return MeteredResponse {
             response,
-            usage: None,
+            usage: Some(UsageOutcome::Unavailable(
+                UsageUnavailableReason::UpstreamError,
+            )),
             cost_usd: None,
         };
     }
@@ -461,7 +174,7 @@ async fn meter_response(
                 )
                 .into_response(StatusCode::BAD_GATEWAY),
                 usage: Some(UsageOutcome::Unavailable(
-                    crate::usage::UsageUnavailableReason::ResponseTooLarge,
+                    UsageUnavailableReason::ResponseTooLarge,
                 )),
                 cost_usd: None,
             };

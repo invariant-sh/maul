@@ -128,12 +128,38 @@ pin_project! {
         budget: BudgetTracker,
         price: Option<Price>,
         finished: bool,
-        completion: Option<UsageCompletion>,
+        completion: CompletionSlot,
     }
 }
 
 pub type UsageCompletion =
     Box<dyn FnOnce(UsageOutcome, Option<crate::budget::MicroUsd>) + Send + 'static>;
+
+/// Ensures the completion callback fires exactly once, including on cancel/drop.
+struct CompletionSlot {
+    completion: Option<UsageCompletion>,
+}
+
+impl CompletionSlot {
+    fn new(completion: Option<UsageCompletion>) -> Self {
+        Self { completion }
+    }
+
+    fn fire(&mut self, outcome: UsageOutcome, cost: Option<crate::budget::MicroUsd>) {
+        if let Some(completion) = self.completion.take() {
+            completion(outcome, cost);
+        }
+    }
+}
+
+impl Drop for CompletionSlot {
+    fn drop(&mut self) {
+        self.fire(
+            UsageOutcome::Unavailable(UsageUnavailableReason::StreamInterrupted),
+            None,
+        );
+    }
+}
 
 impl<S> SseUsageTap<S> {
     pub fn new(inner: S, budget: BudgetTracker, price: Price) -> Self {
@@ -152,7 +178,7 @@ impl<S> SseUsageTap<S> {
             budget,
             price,
             finished: false,
-            completion,
+            completion: CompletionSlot::new(completion),
         }
     }
 }
@@ -171,34 +197,54 @@ where
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(Some(Err(error))) => {
-                *this.finished = true;
-                if let Some(completion) = this.completion.take() {
-                    completion(
-                        UsageOutcome::Unavailable(UsageUnavailableReason::StreamInterrupted),
-                        None,
-                    );
-                }
+                finish_interrupted(this.finished, this.completion);
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
-                if !*this.finished {
-                    *this.finished = true;
-                    let outcome = this.parser.finish();
-                    let cost = if let UsageOutcome::Metered(usage) = &outcome {
-                        this.price.and_then(|price| price.calculate(usage).ok())
-                    } else {
-                        None
-                    };
-                    if let Some(cost) = cost {
-                        this.budget.commit_cost(cost);
-                    }
-                    if let Some(completion) = this.completion.take() {
-                        completion(outcome, cost);
-                    }
-                }
+                finish_clean(
+                    this.finished,
+                    this.parser,
+                    this.budget,
+                    *this.price,
+                    this.completion,
+                );
                 Poll::Ready(None)
             }
             Poll::Pending => Poll::Pending,
         }
     }
+}
+
+fn finish_interrupted(finished: &mut bool, completion: &mut CompletionSlot) {
+    if *finished {
+        return;
+    }
+    *finished = true;
+    completion.fire(
+        UsageOutcome::Unavailable(UsageUnavailableReason::StreamInterrupted),
+        None,
+    );
+}
+
+fn finish_clean(
+    finished: &mut bool,
+    parser: &mut SseUsageParser,
+    budget: &BudgetTracker,
+    price: Option<Price>,
+    completion: &mut CompletionSlot,
+) {
+    if *finished {
+        return;
+    }
+    *finished = true;
+    let outcome = parser.finish();
+    let cost = if let UsageOutcome::Metered(usage) = &outcome {
+        price.and_then(|price| price.calculate(usage).ok())
+    } else {
+        None
+    };
+    if let Some(cost) = cost {
+        budget.commit_cost(cost);
+    }
+    completion.fire(outcome, cost);
 }

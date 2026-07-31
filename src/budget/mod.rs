@@ -4,7 +4,8 @@ use std::fmt;
 
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
@@ -12,8 +13,7 @@ use thiserror::Error;
 use crate::openai::TokenUsage;
 
 /// Monetary amount represented exactly in micro-USD.
-#[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(transparent)]
+#[derive(Debug, Clone, Copy, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub struct MicroUsd(u64);
 
 impl MicroUsd {
@@ -36,6 +36,78 @@ impl fmt::Display for MicroUsd {
             self.0 / 1_000_000,
             self.0 % 1_000_000
         )
+    }
+}
+
+impl Serialize for MicroUsd {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("MicroUsd", 2)?;
+        state.serialize_field("micro_usd", &self.0)?;
+        state.serialize_field("display", &self.to_string())?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for MicroUsd {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct MicroUsdVisitor;
+
+        impl<'de> Visitor<'de> for MicroUsdVisitor {
+            type Value = MicroUsd;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a micro-USD integer or {micro_usd, display} object")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(MicroUsd::from_micro_usd(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = u64::try_from(value).map_err(E::custom)?;
+                Ok(MicroUsd::from_micro_usd(value))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut micro_usd = None;
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "micro_usd" => {
+                            if micro_usd.is_some() {
+                                return Err(de::Error::duplicate_field("micro_usd"));
+                            }
+                            micro_usd = Some(map.next_value::<u64>()?);
+                        }
+                        "display" => {
+                            let _: String = map.next_value()?;
+                        }
+                        other => {
+                            return Err(de::Error::unknown_field(other, &["micro_usd", "display"]));
+                        }
+                    }
+                }
+                let micro_usd = micro_usd.ok_or_else(|| de::Error::missing_field("micro_usd"))?;
+                Ok(MicroUsd::from_micro_usd(micro_usd))
+            }
+        }
+
+        deserializer.deserialize_any(MicroUsdVisitor)
     }
 }
 
