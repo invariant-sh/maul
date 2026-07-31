@@ -1,6 +1,7 @@
 //! Pass-through reverse proxy: bounded request body + streamed upstream response.
 
 mod headers;
+pub mod request_transform;
 mod upstream;
 
 pub use headers::{

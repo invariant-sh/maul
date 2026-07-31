@@ -7,3 +7,4 @@ pub mod openai;
 pub mod pricing;
 pub mod proxy;
 pub mod report;
+pub mod usage;
