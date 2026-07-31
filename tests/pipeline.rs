@@ -89,6 +89,44 @@ async fn call_cap_blocks_after_exactly_one_admitted_request() {
 }
 
 #[tokio::test]
+async fn concurrent_requests_never_exceed_call_cap() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"choices":[]}"#, "application/json"),
+        )
+        .expect(5)
+        .mount(&upstream)
+        .await;
+    let state = Arc::new(state(&upstream.uri(), vec![], 5, 0));
+
+    let handles = (0..25)
+        .map(|_| {
+            let state = Arc::clone(&state);
+            tokio::spawn(async move { handle(&state, completion_request(false)).await })
+        })
+        .collect::<Vec<_>>();
+    let responses = futures_util::future::join_all(handles)
+        .await
+        .into_iter()
+        .map(|result| result.expect("request task"))
+        .collect::<Vec<_>>();
+
+    let allowed = responses
+        .iter()
+        .filter(|response| response.status() == StatusCode::OK)
+        .count();
+    let rejected = responses
+        .iter()
+        .filter(|response| response.status() == StatusCode::TOO_MANY_REQUESTS)
+        .count();
+    assert_eq!(allowed, 5);
+    assert_eq!(rejected, 20);
+    assert_eq!(state.budget.snapshot().calls_reserved, 5);
+}
+
+#[tokio::test]
 async fn observed_cost_blocks_the_next_request() {
     let upstream = MockServer::start().await;
     Mock::given(method("POST"))
@@ -115,6 +153,25 @@ async fn observed_cost_blocks_the_next_request() {
     let body = to_bytes(second.into_body(), 1024 * 1024).await.unwrap();
     let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(value["error"]["code"], "max_cost_usd");
+}
+
+#[tokio::test]
+async fn missing_usage_is_not_counted_as_zero_cost() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"choices":[]}"#, "application/json"),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let state = state(&upstream.uri(), vec![], 10, 1);
+
+    let response = handle(&state, completion_request(false)).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert_eq!(state.budget.snapshot().observed_cost_usd, MicroUsd::ZERO);
 }
 
 #[tokio::test]

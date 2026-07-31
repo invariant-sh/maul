@@ -26,5 +26,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]
 flate2 = "1.1.9"
+proptest = "1.11.0"
 tempfile = "3.27.0"
 wiremock = "0.6.5"

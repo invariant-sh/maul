@@ -1,11 +1,15 @@
+use bytes::Bytes;
+use futures_util::{StreamExt, stream};
+use maul::budget::{BudgetLimits, BudgetTracker, MicroUsd, Price};
 use maul::openai::TokenUsage;
 use maul::proxy::request_transform::include_stream_usage;
 use maul::usage::{
     UsageOutcome, UsageUnavailableReason,
     json::extract_usage,
-    sse::{DEFAULT_MAX_EVENT_BYTES, SseUsageParser},
+    sse::{DEFAULT_MAX_EVENT_BYTES, SseUsageParser, SseUsageTap, UsageCompletion},
 };
 use serde_json::json;
+use std::sync::{Arc, Mutex};
 
 #[test]
 fn extracts_usage_from_json_completion() {
@@ -112,5 +116,40 @@ fn sse_parser_reports_malformed_events_and_oversized_lines() {
     assert_eq!(
         oversized.finish(),
         UsageOutcome::Unavailable(UsageUnavailableReason::MalformedSse)
+    );
+}
+
+#[tokio::test]
+async fn sse_tap_reports_interrupted_streams() {
+    let observed = Arc::new(Mutex::new(None));
+    let callback_observed = Arc::clone(&observed);
+    let completion: UsageCompletion = Box::new(move |outcome, _cost| {
+        *callback_observed.lock().expect("callback lock") = Some(outcome);
+    });
+    let budget = BudgetTracker::new(BudgetLimits {
+        max_llm_calls: 1,
+        max_cost_usd: MicroUsd::ZERO,
+    });
+    let stream = stream::iter(vec![
+        Ok::<Bytes, &'static str>(Bytes::from_static(b"data: {\"usage\":null}\n\n")),
+        Err("upstream disconnected"),
+    ]);
+    let mut tap = SseUsageTap::with_completion(
+        stream,
+        budget,
+        Some(Price::new(
+            MicroUsd::from_micro_usd(1),
+            MicroUsd::from_micro_usd(1),
+        )),
+        Some(completion),
+    );
+
+    while tap.next().await.is_some() {}
+
+    assert_eq!(
+        observed.lock().expect("test lock").as_ref(),
+        Some(&UsageOutcome::Unavailable(
+            UsageUnavailableReason::StreamInterrupted
+        ))
     );
 }
