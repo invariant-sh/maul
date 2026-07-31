@@ -118,6 +118,8 @@ async fn main() -> Result<(), StartupError> {
         pricing,
         report: report.clone(),
     };
+    let budget_snapshot = state.budget.snapshot();
+    let pricing_registry_version = state.pricing.version().to_owned();
 
     let app = Router::new().fallback(handler).with_state(state);
 
@@ -126,7 +128,7 @@ async fn main() -> Result<(), StartupError> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
-    report.request_shutdown();
+    report.request_shutdown_with_metadata(budget_snapshot, pricing_registry_version);
     collector.await?;
     Ok(())
 }

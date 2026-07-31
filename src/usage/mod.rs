@@ -8,7 +8,7 @@ use thiserror::Error;
 
 use crate::openai::TokenUsage;
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 pub enum UsageUnavailableReason {
     MissingUsage,
     MalformedUsage,
@@ -17,7 +17,7 @@ pub enum UsageUnavailableReason {
     StreamInterrupted,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Deserialize, Eq, PartialEq, Serialize)]
 pub enum UsageOutcome {
     Metered(TokenUsage),
     Unavailable(UsageUnavailableReason),

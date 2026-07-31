@@ -75,7 +75,7 @@ pub struct BudgetLimits {
     pub max_cost_usd: MicroUsd,
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+#[derive(Debug, Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
 pub struct BudgetSnapshot {
     pub calls_reserved: u64,
     pub calls_limit: u64,

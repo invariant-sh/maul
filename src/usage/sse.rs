@@ -126,19 +126,33 @@ pin_project! {
         inner: S,
         parser: SseUsageParser,
         budget: BudgetTracker,
-        price: Price,
+        price: Option<Price>,
         finished: bool,
+        completion: Option<UsageCompletion>,
     }
 }
 
+pub type UsageCompletion =
+    Box<dyn FnOnce(UsageOutcome, Option<crate::budget::MicroUsd>) + Send + 'static>;
+
 impl<S> SseUsageTap<S> {
     pub fn new(inner: S, budget: BudgetTracker, price: Price) -> Self {
+        Self::with_completion(inner, budget, Some(price), None)
+    }
+
+    pub fn with_completion(
+        inner: S,
+        budget: BudgetTracker,
+        price: Option<Price>,
+        completion: Option<UsageCompletion>,
+    ) -> Self {
         Self {
             inner,
             parser: SseUsageParser::default(),
             budget,
             price,
             finished: false,
+            completion,
         }
     }
 }
@@ -158,15 +172,28 @@ where
             }
             Poll::Ready(Some(Err(error))) => {
                 *this.finished = true;
+                if let Some(completion) = this.completion.take() {
+                    completion(
+                        UsageOutcome::Unavailable(UsageUnavailableReason::StreamInterrupted),
+                        None,
+                    );
+                }
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
                 if !*this.finished {
                     *this.finished = true;
-                    if let UsageOutcome::Metered(usage) = this.parser.finish()
-                        && let Ok(cost) = this.price.calculate(&usage)
-                    {
+                    let outcome = this.parser.finish();
+                    let cost = if let UsageOutcome::Metered(usage) = &outcome {
+                        this.price.and_then(|price| price.calculate(usage).ok())
+                    } else {
+                        None
+                    };
+                    if let Some(cost) = cost {
                         this.budget.commit_cost(cost);
+                    }
+                    if let Some(completion) = this.completion.take() {
+                        completion(outcome, cost);
                     }
                 }
                 Poll::Ready(None)
