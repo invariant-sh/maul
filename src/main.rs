@@ -2,21 +2,47 @@
 //!
 //! Agent → localhost (Maul) → real OpenAI-compatible base_url.
 
-use std::{sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     Router,
     extract::{Request, State},
     response::Response,
 };
+use clap::Parser;
 use reqwest::Client;
+use thiserror::Error;
 use tokio::signal;
+use tokio::task::JoinError;
 use tracing_subscriber::EnvFilter;
 
 use maul::config;
 use maul::fault::FaultEngine;
 use maul::proxy::{self, ProxyState};
 use maul::report;
+
+#[derive(Debug, Parser)]
+#[command(name = "maul", about = "Adversarial proxy for LLM agent reliability")]
+struct Cli {
+    /// Path to the Maul YAML configuration.
+    #[arg(long, value_name = "PATH", default_value = "maul.yaml")]
+    config: PathBuf,
+    /// Validate configuration and exit without binding a listener.
+    #[arg(long)]
+    validate: bool,
+}
+
+#[derive(Debug, Error)]
+enum StartupError {
+    #[error(transparent)]
+    Config(#[from] config::ConfigError),
+    #[error("failed to build HTTP client: {0}")]
+    HttpClient(#[from] reqwest::Error),
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("collector task failed: {0}")]
+    Collector(#[from] JoinError),
+}
 
 async fn shutdown_signal() {
     let ctrl_c = async {
@@ -44,21 +70,27 @@ async fn shutdown_signal() {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), StartupError> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "maul=info".into()))
         .init();
     tracing::info!("starting maul");
 
-    let config = config::load_default()?;
+    let cli = Cli::parse();
+    let config = config::load(&cli.config)?;
     tracing::info!(
         seed = config.seed,
         probability = config.probability,
         scenarios = ?config.scenarios,
         max_llm_calls = config.budget.max_llm_calls,
-        max_cost_usd = config.budget.max_cost_usd,
+        max_cost_usd = %config.budget.max_cost_usd,
         "config loaded"
     );
+
+    if cli.validate {
+        tracing::info!(path = %cli.config.display(), "configuration is valid");
+        return Ok(());
+    }
 
     let listen_addr = config.proxy_listen.clone();
     tracing::info!(%listen_addr, "listening");

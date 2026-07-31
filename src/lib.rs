@@ -1,6 +1,8 @@
-//! Maul library surface — proxy, config, faults, and reliability report.
+//! Maul library surface — protocol, config, proxy, faults, budgets, and reports.
 
+pub mod budget;
 pub mod config;
 pub mod fault;
+pub mod openai;
 pub mod proxy;
 pub mod report;

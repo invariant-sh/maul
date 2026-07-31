@@ -12,6 +12,7 @@ use axum::http::{Request, StatusCode};
 use axum::response::Response;
 use flate2::Compression;
 use flate2::write::GzEncoder;
+use maul::budget::MicroUsd;
 use maul::config::{Budget, Config};
 use maul::fault::{FORCE_500, FaultEngine, MALFORMED_TOOL_CALL_JSON};
 use maul::proxy::{ProxyState, apply_mutate_after, handle};
@@ -37,7 +38,7 @@ fn state(upstream: &str, scenarios: Vec<&str>, probability: f64) -> ProxyState {
         seed: 42,
         budget: Budget {
             max_llm_calls: 100,
-            max_cost_usd: 5.0,
+            max_cost_usd: MicroUsd::from_micro_usd(5_000_000),
         },
     };
     let (report, _join) =

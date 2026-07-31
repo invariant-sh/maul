@@ -18,6 +18,10 @@ use crate::config::Config;
 pub const FORCE_500: &str = "force_500";
 pub const MALFORMED_TOOL_CALL_JSON: &str = "malformed_tool_call_json";
 
+pub fn is_supported_scenario(name: &str) -> bool {
+    matches!(name, FORCE_500 | MALFORMED_TOOL_CALL_JSON)
+}
+
 /// Control flow for a single proxied request.
 #[derive(Debug)]
 pub enum Action {

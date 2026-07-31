@@ -1,5 +1,6 @@
 //! Fault engine + body mutator edge cases (real agent / OpenAI shapes).
 
+use maul::budget::MicroUsd;
 use maul::config::{Budget, Config};
 use maul::fault::{
     Action, FORCE_500, FaultEngine, MALFORMED_TOOL_CALL_JSON, malform_tool_call_json,
@@ -14,7 +15,7 @@ fn config_with(scenarios: Vec<&str>, probability: f64, seed: u64) -> Config {
         seed,
         budget: Budget {
             max_llm_calls: 100,
-            max_cost_usd: 5.0,
+            max_cost_usd: MicroUsd::from_micro_usd(5_000_000),
         },
     }
 }
