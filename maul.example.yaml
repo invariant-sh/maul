@@ -5,7 +5,7 @@
 # maul.yaml is gitignored — keep local overrides and secrets out of the repo.
 # The API key is NOT configured here; clients send it via Authorization.
 
-proxy_listen: "0.0.0.0:7777"
+proxy_listen: "127.0.0.1:7777"
 
 # OpenAI-compatible upstream only (v0.1). Examples:
 #   https://api.openai.com

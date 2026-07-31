@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 use axum::{
     http::{HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
@@ -122,11 +122,8 @@ impl FaultEngine {
 }
 
 fn force_500_response() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "maul: injected fault force_500",
-    )
-        .into_response()
+    OpenAiErrorEnvelope::new("maul: injected fault force_500", "server_error", FORCE_500)
+        .into_response(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 fn force_429_response() -> Response {
