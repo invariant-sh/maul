@@ -1,12 +1,17 @@
-use std::{collections::HashSet, fs, path::Path};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::Path,
+};
 
 use rust_decimal::Decimal;
 use serde::Deserialize;
 use thiserror::Error;
 
 use crate::{
-    budget::{MicroUsd, MicroUsdError},
+    budget::{MicroUsd, MicroUsdError, Price},
     fault::is_supported_scenario,
+    openai::{ModelId, ModelIdError},
 };
 
 const DEFAULT_PATH: &str = "maul.yaml";
@@ -20,6 +25,13 @@ pub struct RawBudget {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RawPrice {
+    pub input_usd_per_million: Decimal,
+    pub output_usd_per_million: Decimal,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RawConfig {
     pub proxy_listen: String,
     pub upstream_base_url: String,
@@ -27,6 +39,8 @@ pub struct RawConfig {
     pub probability: f64,
     pub seed: u64,
     pub budget: RawBudget,
+    #[serde(default)]
+    pub model_prices: HashMap<String, RawPrice>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -43,6 +57,7 @@ pub struct Config {
     pub probability: f64,
     pub seed: u64,
     pub budget: Budget,
+    pub model_prices: HashMap<String, Price>,
 }
 
 #[derive(Debug, Error)]
@@ -69,6 +84,12 @@ pub enum ConfigError {
     DuplicateScenario(String),
     #[error("invalid max_cost_usd: {0}")]
     InvalidCost(#[from] MicroUsdError),
+    #[error("invalid model identifier `{model}`: {source}")]
+    InvalidModelId {
+        model: String,
+        #[source]
+        source: ModelIdError,
+    },
 }
 
 impl RawConfig {
@@ -96,6 +117,22 @@ impl RawConfig {
             }
         }
 
+        let model_prices = self
+            .model_prices
+            .into_iter()
+            .map(|(model, raw_price)| {
+                let model_id = ModelId::try_from(model.clone()).map_err(|source| {
+                    ConfigError::InvalidModelId {
+                        model: model.clone(),
+                        source,
+                    }
+                })?;
+                let input = MicroUsd::try_from(raw_price.input_usd_per_million)?;
+                let output = MicroUsd::try_from(raw_price.output_usd_per_million)?;
+                Ok((model_id.as_str().to_owned(), Price::new(input, output)))
+            })
+            .collect::<Result<HashMap<_, _>, ConfigError>>()?;
+
         Ok(Config {
             proxy_listen: self.proxy_listen,
             upstream_base_url: self.upstream_base_url,
@@ -106,6 +143,7 @@ impl RawConfig {
                 max_llm_calls: self.budget.max_llm_calls,
                 max_cost_usd: MicroUsd::try_from(self.budget.max_cost_usd)?,
             },
+            model_prices,
         })
     }
 }

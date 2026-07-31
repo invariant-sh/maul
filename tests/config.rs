@@ -40,6 +40,7 @@ budget:
                 max_llm_calls: 10,
                 max_cost_usd: MicroUsd::from_micro_usd(1_500_000),
             },
+            model_prices: std::collections::HashMap::new(),
         }
     );
 }
@@ -237,4 +238,55 @@ budget:
     );
 
     assert!(load(file.path()).is_err());
+}
+
+#[test]
+fn load_converts_model_price_overrides_to_micro_usd() {
+    let file = write_yaml(
+        r#"
+proxy_listen: "0.0.0.0:7777"
+upstream_base_url: "https://api.openai.com"
+scenarios: []
+probability: 0.0
+seed: 0
+budget:
+  max_llm_calls: 100
+  max_cost_usd: 5.0
+model_prices:
+  custom-model:
+    input_usd_per_million: 0.25
+    output_usd_per_million: 1.50
+"#,
+    );
+
+    let config = load(file.path()).expect("config should load");
+    let price = config.model_prices.get("custom-model").expect("price");
+    assert_eq!(price.input_per_million, MicroUsd::from_micro_usd(250_000));
+    assert_eq!(
+        price.output_per_million,
+        MicroUsd::from_micro_usd(1_500_000)
+    );
+}
+
+#[test]
+fn load_rejects_negative_model_price() {
+    let file = write_yaml(
+        r#"
+proxy_listen: "0.0.0.0:7777"
+upstream_base_url: "https://api.openai.com"
+scenarios: []
+probability: 0.0
+seed: 0
+budget:
+  max_llm_calls: 100
+  max_cost_usd: 5.0
+model_prices:
+  custom-model:
+    input_usd_per_million: -0.25
+    output_usd_per_million: 1.50
+"#,
+    );
+
+    let error = load(file.path()).unwrap_err();
+    assert!(error.to_string().contains("non-negative"));
 }

@@ -4,5 +4,6 @@ pub mod budget;
 pub mod config;
 pub mod fault;
 pub mod openai;
+pub mod pricing;
 pub mod proxy;
 pub mod report;

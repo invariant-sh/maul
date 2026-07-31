@@ -5,7 +5,11 @@ use std::fmt;
 use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use thiserror::Error;
+
+use crate::openai::TokenUsage;
 
 /// Monetary amount represented exactly in micro-USD.
 #[derive(Debug, Clone, Copy, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
@@ -62,5 +66,163 @@ impl TryFrom<Decimal> for MicroUsd {
             .to_u64()
             .map(Self)
             .ok_or(MicroUsdError::Overflow(amount))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct BudgetLimits {
+    pub max_llm_calls: u64,
+    pub max_cost_usd: MicroUsd,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+pub struct BudgetSnapshot {
+    pub calls_reserved: u64,
+    pub calls_limit: u64,
+    pub observed_cost_usd: MicroUsd,
+    pub cost_limit_usd: MicroUsd,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct CallPermit {
+    pub call_number: u64,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum BudgetAdmission {
+    Allowed(CallPermit),
+    CallCapExceeded {
+        calls_reserved: u64,
+        calls_limit: u64,
+    },
+    CostCapExceeded {
+        observed_cost_usd: MicroUsd,
+        cost_limit_usd: MicroUsd,
+    },
+}
+
+#[derive(Debug)]
+struct BudgetState {
+    limits: BudgetLimits,
+    calls_reserved: AtomicU64,
+    observed_cost_usd: AtomicU64,
+}
+
+/// Concurrent budget admission and observed-spend accounting.
+#[derive(Debug, Clone)]
+pub struct BudgetTracker {
+    state: Arc<BudgetState>,
+}
+
+impl BudgetTracker {
+    pub fn new(limits: BudgetLimits) -> Self {
+        Self {
+            state: Arc::new(BudgetState {
+                limits,
+                calls_reserved: AtomicU64::new(0),
+                observed_cost_usd: AtomicU64::new(0),
+            }),
+        }
+    }
+
+    pub fn admit(&self) -> BudgetAdmission {
+        let observed = self.state.observed_cost_usd.load(Ordering::Acquire);
+        if self.state.limits.max_cost_usd != MicroUsd::ZERO
+            && observed >= self.state.limits.max_cost_usd.as_u64()
+        {
+            return BudgetAdmission::CostCapExceeded {
+                observed_cost_usd: MicroUsd::from_micro_usd(observed),
+                cost_limit_usd: self.state.limits.max_cost_usd,
+            };
+        }
+
+        let call_number = self.reserve_call();
+        match call_number {
+            Ok(call_number) => BudgetAdmission::Allowed(CallPermit { call_number }),
+            Err(calls_reserved) => BudgetAdmission::CallCapExceeded {
+                calls_reserved,
+                calls_limit: self.state.limits.max_llm_calls,
+            },
+        }
+    }
+
+    pub fn commit_cost(&self, cost: MicroUsd) -> MicroUsd {
+        let mut current = self.state.observed_cost_usd.load(Ordering::Acquire);
+        loop {
+            let next = current.saturating_add(cost.as_u64());
+            match self.state.observed_cost_usd.compare_exchange_weak(
+                current,
+                next,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return MicroUsd::from_micro_usd(next),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    pub fn snapshot(&self) -> BudgetSnapshot {
+        BudgetSnapshot {
+            calls_reserved: self.state.calls_reserved.load(Ordering::Acquire),
+            calls_limit: self.state.limits.max_llm_calls,
+            observed_cost_usd: MicroUsd::from_micro_usd(
+                self.state.observed_cost_usd.load(Ordering::Acquire),
+            ),
+            cost_limit_usd: self.state.limits.max_cost_usd,
+        }
+    }
+
+    fn reserve_call(&self) -> Result<u64, u64> {
+        let mut current = self.state.calls_reserved.load(Ordering::Acquire);
+        loop {
+            if current >= self.state.limits.max_llm_calls {
+                return Err(current);
+            }
+
+            match self.state.calls_reserved.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return Ok(current + 1),
+                Err(actual) => current = actual,
+            }
+        }
+    }
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum CostError {
+    #[error("token cost overflowed micro-USD representation")]
+    Overflow,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct Price {
+    pub input_per_million: MicroUsd,
+    pub output_per_million: MicroUsd,
+}
+
+impl Price {
+    pub const fn new(input_per_million: MicroUsd, output_per_million: MicroUsd) -> Self {
+        Self {
+            input_per_million,
+            output_per_million,
+        }
+    }
+
+    pub fn calculate(self, usage: &TokenUsage) -> Result<MicroUsd, CostError> {
+        let input = u128::from(usage.prompt_tokens)
+            .checked_mul(u128::from(self.input_per_million.as_u64()))
+            .ok_or(CostError::Overflow)?;
+        let output = u128::from(usage.completion_tokens)
+            .checked_mul(u128::from(self.output_per_million.as_u64()))
+            .ok_or(CostError::Overflow)?;
+        let total = input.checked_add(output).ok_or(CostError::Overflow)?;
+        let rounded = total.checked_add(500_000).ok_or(CostError::Overflow)? / 1_000_000;
+        let value = u64::try_from(rounded).map_err(|_| CostError::Overflow)?;
+        Ok(MicroUsd::from_micro_usd(value))
     }
 }

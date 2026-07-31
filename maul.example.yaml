@@ -28,3 +28,10 @@ seed: 42
 budget:
   max_llm_calls: 100
   max_cost_usd: 5.0
+
+# Optional pricing overrides for OpenAI-compatible or custom model IDs.
+# Values are USD per one million tokens.
+# model_prices:
+#   custom-model:
+#     input_usd_per_million: 0.25
+#     output_usd_per_million: 1.50

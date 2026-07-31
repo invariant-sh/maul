@@ -17,6 +17,7 @@ fn config_with(scenarios: Vec<&str>, probability: f64, seed: u64) -> Config {
             max_llm_calls: 100,
             max_cost_usd: MicroUsd::from_micro_usd(5_000_000),
         },
+        model_prices: std::collections::HashMap::new(),
     }
 }
 

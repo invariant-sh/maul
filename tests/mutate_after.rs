@@ -40,6 +40,7 @@ fn state(upstream: &str, scenarios: Vec<&str>, probability: f64) -> ProxyState {
             max_llm_calls: 100,
             max_cost_usd: MicroUsd::from_micro_usd(5_000_000),
         },
+        model_prices: std::collections::HashMap::new(),
     };
     let (report, _join) =
         spawn_collector(std::env::temp_dir().join("maul_mutate_test_report.json"));
