@@ -3,7 +3,7 @@
 use maul::budget::MicroUsd;
 use maul::config::{Budget, Config};
 use maul::fault::{
-    Action, FORCE_500, FaultEngine, MALFORMED_TOOL_CALL_JSON, malform_tool_call_json,
+    Action, FORCE_429, FORCE_500, FaultEngine, MALFORMED_TOOL_CALL_JSON, malform_tool_call_json,
 };
 
 fn config_with(scenarios: Vec<&str>, probability: f64, seed: u64) -> Config {
@@ -72,6 +72,25 @@ fn always_injects_malformed_tool_call_when_probability_one() {
             }
             other => panic!("expected MutateAfter, got {other:?}"),
         }
+    }
+}
+
+#[tokio::test]
+async fn always_injects_force_429_with_retry_after_when_probability_one() {
+    let engine = FaultEngine::from_config(&config_with(vec![FORCE_429], 1.0, 7));
+    match engine.decide() {
+        Action::ShortCircuit { scenario, response } => {
+            assert_eq!(scenario, FORCE_429);
+            assert_eq!(response.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+            let body = axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["error"]["type"], "rate_limit_error");
+            assert_eq!(value["error"]["code"], FORCE_429);
+        }
+        other => panic!("expected force_429 ShortCircuit, got {other:?}"),
     }
 }
 

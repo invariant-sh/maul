@@ -7,7 +7,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use maul::budget::{BudgetLimits, BudgetTracker, MicroUsd};
 use maul::config::{Budget, Config};
-use maul::fault::FaultEngine;
+use maul::fault::{FORCE_429, FaultEngine};
 use maul::pricing::PricingRegistry;
 use maul::proxy::{ProxyState, handle};
 use maul::report::spawn_collector;
@@ -171,4 +171,24 @@ async fn non_billable_routes_bypass_faults_and_budget() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(state.budget.snapshot().calls_reserved, 0);
+}
+
+#[tokio::test]
+async fn force_429_consumes_call_without_contacting_upstream() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&upstream)
+        .await;
+    let state = state(&upstream.uri(), vec![FORCE_429], 1, 0);
+
+    let response = handle(&state, completion_request(false)).await;
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["error"]["code"], FORCE_429);
+    assert_eq!(state.budget.snapshot().calls_reserved, 1);
 }

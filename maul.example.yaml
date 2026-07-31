@@ -15,6 +15,7 @@ upstream_base_url: "https://api.openai.com"
 
 # Active fault scenarios. Supported today:
 #   force_500 — ShortCircuit with HTTP 500 (never calls upstream)
+#   force_429 — ShortCircuit with HTTP 429 and Retry-After (never calls upstream)
 #   malformed_tool_call_json — MutateAfter: corrupt tool_calls[].function.arguments
 scenarios: []
 
