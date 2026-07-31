@@ -1,7 +1,15 @@
 //! Incremental, bounded SSE usage parser.
 
+use bytes::Bytes;
+use futures_util::Stream;
+use pin_project_lite::pin_project;
 use serde_json::Value;
+use std::{
+    pin::Pin,
+    task::{Context, Poll},
+};
 
+use crate::budget::{BudgetTracker, Price};
 use crate::openai::TokenUsage;
 
 use super::{UsageFields, UsageOutcome, UsageUnavailableReason};
@@ -45,7 +53,7 @@ impl SseUsageParser {
         }
     }
 
-    pub fn finish(mut self) -> UsageOutcome {
+    pub fn finish(&mut self) -> UsageOutcome {
         if self.malformed || self.buffer.len() > self.max_event_bytes {
             return UsageOutcome::Unavailable(UsageUnavailableReason::MalformedSse);
         }
@@ -55,7 +63,7 @@ impl SseUsageParser {
         if self.malformed {
             return UsageOutcome::Unavailable(UsageUnavailableReason::MalformedSse);
         }
-        self.usage.map_or(
+        self.usage.as_ref().cloned().map_or(
             UsageOutcome::Unavailable(UsageUnavailableReason::MissingUsage),
             UsageOutcome::Metered,
         )
@@ -109,5 +117,61 @@ impl SseUsageParser {
 impl Default for SseUsageParser {
     fn default() -> Self {
         Self::new(DEFAULT_MAX_EVENT_BYTES)
+    }
+}
+
+pin_project! {
+    pub struct SseUsageTap<S> {
+        #[pin]
+        inner: S,
+        parser: SseUsageParser,
+        budget: BudgetTracker,
+        price: Price,
+        finished: bool,
+    }
+}
+
+impl<S> SseUsageTap<S> {
+    pub fn new(inner: S, budget: BudgetTracker, price: Price) -> Self {
+        Self {
+            inner,
+            parser: SseUsageParser::default(),
+            budget,
+            price,
+            finished: false,
+        }
+    }
+}
+
+impl<S, E> Stream for SseUsageTap<S>
+where
+    S: Stream<Item = Result<Bytes, E>>,
+{
+    type Item = Result<Bytes, E>;
+
+    fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let mut this = self.project();
+        match this.inner.as_mut().poll_next(context) {
+            Poll::Ready(Some(Ok(bytes))) => {
+                this.parser.push(&bytes);
+                Poll::Ready(Some(Ok(bytes)))
+            }
+            Poll::Ready(Some(Err(error))) => {
+                *this.finished = true;
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                if !*this.finished {
+                    *this.finished = true;
+                    if let UsageOutcome::Metered(usage) = this.parser.finish()
+                        && let Ok(cost) = this.price.calculate(&usage)
+                    {
+                        this.budget.commit_cost(cost);
+                    }
+                }
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }

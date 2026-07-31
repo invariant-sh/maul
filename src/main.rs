@@ -16,8 +16,10 @@ use tokio::signal;
 use tokio::task::JoinError;
 use tracing_subscriber::EnvFilter;
 
+use maul::budget::{BudgetLimits, BudgetTracker};
 use maul::config;
 use maul::fault::FaultEngine;
+use maul::pricing::PricingRegistry;
 use maul::proxy::{self, ProxyState};
 use maul::report;
 
@@ -102,11 +104,18 @@ async fn main() -> Result<(), StartupError> {
 
     let (report, collector) = report::spawn_collector("reliability_report.json");
     let fault = Arc::new(FaultEngine::from_config(&config));
+    let budget = BudgetTracker::new(BudgetLimits {
+        max_llm_calls: config.budget.max_llm_calls,
+        max_cost_usd: config.budget.max_cost_usd,
+    });
+    let pricing = PricingRegistry::with_overrides(&config.model_prices);
 
     let state = ProxyState {
         client,
         upstream_base_url: Arc::new(config.upstream_base_url),
         fault,
+        budget,
+        pricing,
         report: report.clone(),
     };
 

@@ -6,6 +6,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use thiserror::Error;
 
 pub const CHAT_COMPLETIONS_PATH: &str = "/v1/chat/completions";
@@ -54,6 +55,41 @@ impl TryFrom<String> for ModelId {
 impl ModelId {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ChatRequestMetadata {
+    pub model: ModelId,
+    pub stream: bool,
+}
+
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum ChatRequestError {
+    #[error("chat completion request must be a JSON object")]
+    NotObject,
+    #[error("chat completion request is missing a model")]
+    MissingModel,
+    #[error(transparent)]
+    InvalidModel(#[from] ModelIdError),
+}
+
+impl TryFrom<&Value> for ChatRequestMetadata {
+    type Error = ChatRequestError;
+
+    fn try_from(value: &Value) -> Result<Self, Self::Error> {
+        let object = value.as_object().ok_or(ChatRequestError::NotObject)?;
+        let model = object
+            .get("model")
+            .and_then(Value::as_str)
+            .ok_or(ChatRequestError::MissingModel)?;
+        Ok(Self {
+            model: ModelId::try_from(model.to_owned())?,
+            stream: object
+                .get("stream")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+        })
     }
 }
 

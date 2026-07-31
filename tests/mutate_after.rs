@@ -13,8 +13,10 @@ use axum::response::Response;
 use flate2::Compression;
 use flate2::write::GzEncoder;
 use maul::budget::MicroUsd;
+use maul::budget::{BudgetLimits, BudgetTracker};
 use maul::config::{Budget, Config};
 use maul::fault::{FORCE_500, FaultEngine, MALFORMED_TOOL_CALL_JSON};
+use maul::pricing::PricingRegistry;
 use maul::proxy::{ProxyState, apply_mutate_after, handle};
 use maul::report::spawn_collector;
 use reqwest::Client;
@@ -48,6 +50,11 @@ fn state(upstream: &str, scenarios: Vec<&str>, probability: f64) -> ProxyState {
         client: test_client(),
         upstream_base_url: Arc::new(upstream.to_owned()),
         fault: Arc::new(FaultEngine::from_config(&config)),
+        budget: BudgetTracker::new(BudgetLimits {
+            max_llm_calls: config.budget.max_llm_calls,
+            max_cost_usd: config.budget.max_cost_usd,
+        }),
+        pricing: PricingRegistry::with_overrides(&config.model_prices),
         report,
     }
 }
@@ -221,7 +228,7 @@ async fn mutate_after_sse_text_only_forces_fault_tool_call() {
     let req = Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
-        .body(Body::from("{}"))
+        .body(Body::from(r#"{"model":"gpt-4o-mini"}"#))
         .unwrap();
 
     let response = handle(&state, req).await;
@@ -294,7 +301,7 @@ async fn forward_does_not_mutate() {
     let req = Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
-        .body(Body::from("{}"))
+        .body(Body::from(r#"{"model":"gpt-4o-mini"}"#))
         .expect("request");
 
     let response = handle(&state, req).await;
@@ -322,7 +329,7 @@ async fn force_500_short_circuits_without_upstream() {
     let req = Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
-        .body(Body::from("{}"))
+        .body(Body::from(r#"{"model":"gpt-4o-mini"}"#))
         .unwrap();
 
     let response = handle(&state, req).await;

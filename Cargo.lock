@@ -1116,9 +1116,12 @@ name = "maul"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "bytes",
  "clap",
  "flate2",
  "futures-util",
+ "http-body-util",
+ "pin-project-lite",
  "rand 0.10.2",
  "reqwest",
  "rust_decimal",
