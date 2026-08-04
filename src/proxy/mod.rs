@@ -1,6 +1,8 @@
 //! Pass-through reverse proxy: bounded request body + streamed upstream response.
 
 mod headers;
+mod pipeline;
+pub mod request_transform;
 mod upstream;
 
 pub use headers::{
@@ -20,8 +22,19 @@ use axum::{
 };
 use reqwest::Client;
 
-use crate::fault::{Action, FaultEngine, malform_tool_call_json};
 use crate::report::ReportHandle;
+use crate::{
+    budget::{BudgetTracker, MicroUsd, Price},
+    fault::{FaultEngine, malform_tool_call_json},
+    openai::{OpenAiErrorEnvelope, classify_billable_route},
+    pricing::PricingRegistry,
+    report::{BudgetDecision, RequestObservation},
+    usage::{
+        UsageOutcome, UsageUnavailableReason,
+        json::extract_usage,
+        sse::{SseUsageTap, UsageCompletion},
+    },
+};
 
 /// Hard cap for inbound request bodies (chat JSON is small; SSE lives on the response).
 pub const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
@@ -35,10 +48,12 @@ pub struct ProxyState {
     pub client: Client,
     pub upstream_base_url: Arc<String>,
     pub fault: Arc<FaultEngine>,
+    pub budget: BudgetTracker,
+    pub pricing: PricingRegistry,
     pub report: ReportHandle,
 }
 
-/// Entry point for each agent request: maybe short-circuit, mutate-after, or forward.
+/// Entry point for each agent request: classify, admit, fault, execute, and report.
 pub async fn handle(state: &ProxyState, req: Request) -> Response {
     let started = Instant::now();
     let path = req
@@ -47,40 +62,158 @@ pub async fn handle(state: &ProxyState, req: Request) -> Response {
         .map(|pq| pq.as_str().to_owned())
         .unwrap_or_else(|| "/".to_owned());
 
-    match state.fault.decide() {
-        Action::ShortCircuit { scenario, response } => {
-            let status = response.status().as_u16();
-            state.report.record_request(
-                path,
-                status,
-                started.elapsed().as_millis() as u64,
-                Some(scenario.to_owned()),
-            );
-            response
-        }
-        Action::MutateAfter { scenario } => {
-            let upstream =
-                reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
-            let (response, injected) = apply_mutate_after(scenario, upstream).await;
-            let status = response.status().as_u16();
-            state.report.record_request(
-                path,
-                status,
-                started.elapsed().as_millis() as u64,
-                injected.map(str::to_owned),
-            );
-            response
-        }
-        Action::Forward => {
-            let response =
-                reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
-            let status = response.status().as_u16();
-            state
-                .report
-                .record_request(path, status, started.elapsed().as_millis() as u64, None);
-            response
-        }
+    if classify_billable_route(req.method(), req.uri()).is_none() {
+        let response = reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
+        record_request(state, path, started, response.status().as_u16(), None);
+        return response;
     }
+
+    pipeline::handle_billable(state, req, path, started).await
+}
+
+fn record_request(
+    state: &ProxyState,
+    path: String,
+    started: Instant,
+    status: u16,
+    fault: Option<String>,
+) {
+    state
+        .report
+        .record_request(path, status, started.elapsed().as_millis() as u64, fault);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_billable(
+    state: &ProxyState,
+    path: String,
+    started: Instant,
+    status: u16,
+    fault: Option<String>,
+    model: Option<String>,
+    call_number: Option<u64>,
+    budget_decision: BudgetDecision,
+    usage: Option<UsageOutcome>,
+    cost_usd: Option<MicroUsd>,
+) {
+    state.report.record(RequestObservation::billable(
+        path,
+        status,
+        started.elapsed().as_millis() as u64,
+        fault,
+        model,
+        call_number,
+        budget_decision,
+        usage,
+        cost_usd,
+    ));
+}
+
+pub(crate) struct MeteredResponse {
+    pub response: Response,
+    pub usage: Option<UsageOutcome>,
+    pub cost_usd: Option<MicroUsd>,
+}
+
+pub(crate) async fn meter_response(
+    response: Response,
+    stream: bool,
+    budget: BudgetTracker,
+    price: Option<Price>,
+    completion: Option<UsageCompletion>,
+) -> MeteredResponse {
+    let Some(price) = price else {
+        if stream {
+            return MeteredResponse {
+                response: meter_stream_response(response, budget, None, completion),
+                usage: None,
+                cost_usd: None,
+            };
+        }
+        return MeteredResponse {
+            response,
+            usage: None,
+            cost_usd: None,
+        };
+    };
+    if !response.status().is_success() {
+        // Streaming Forward records only via completion — always fire it once.
+        if let Some(completion) = completion {
+            completion(
+                UsageOutcome::Unavailable(UsageUnavailableReason::UpstreamError),
+                None,
+            );
+        }
+        return MeteredResponse {
+            response,
+            usage: Some(UsageOutcome::Unavailable(
+                UsageUnavailableReason::UpstreamError,
+            )),
+            cost_usd: None,
+        };
+    }
+    if stream {
+        return MeteredResponse {
+            response: meter_stream_response(response, budget, Some(price), completion),
+            usage: None,
+            cost_usd: None,
+        };
+    }
+
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = match to_bytes(response.into_body(), MAX_MUTATE_BODY_BYTES).await {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::warn!(%error, "usage metering: response body too large or failed");
+            return MeteredResponse {
+                response: OpenAiErrorEnvelope::new(
+                    "maul: response body exceeded metering limit",
+                    "server_error",
+                    "response_body_too_large",
+                )
+                .into_response(StatusCode::BAD_GATEWAY),
+                usage: Some(UsageOutcome::Unavailable(
+                    UsageUnavailableReason::ResponseTooLarge,
+                )),
+                cost_usd: None,
+            };
+        }
+    };
+    let usage = extract_usage(&body);
+    let cost_usd = if let UsageOutcome::Metered(usage) = &usage
+        && let Ok(cost) = price.calculate(usage)
+    {
+        budget.commit_cost(cost);
+        Some(cost)
+    } else {
+        None
+    };
+    let mut output = Response::new(Body::from(body));
+    *output.status_mut() = status;
+    *output.headers_mut() = prepare_response_headers(headers);
+    MeteredResponse {
+        response: output,
+        usage: Some(usage),
+        cost_usd,
+    }
+}
+
+fn meter_stream_response(
+    response: Response,
+    budget: BudgetTracker,
+    price: Option<Price>,
+    completion: Option<UsageCompletion>,
+) -> Response {
+    let status = response.status();
+    let headers = response.headers().clone();
+    let stream = response.into_body().into_data_stream();
+    let mut output = Response::new(Body::from_stream(SseUsageTap::with_completion(
+        stream, budget, price, completion,
+    )));
+    *output.status_mut() = status;
+    *output.headers_mut() = headers;
+    output
 }
 
 /// Buffer the upstream body, corrupt tool_calls JSON when possible, rebuild the response.

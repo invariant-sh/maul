@@ -35,3 +35,11 @@ jobs:
 
       - name: Build
         run: cargo build --verbose
+
+      - name: Validate example configuration
+        run: cargo run -- --config maul.example.yaml --validate
+
+      - name: Dependency audit
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories bans sources

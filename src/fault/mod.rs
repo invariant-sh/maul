@@ -7,16 +7,21 @@ pub use mutate::malform_tool_call_json;
 use std::sync::Mutex;
 
 use axum::{
-    http::StatusCode,
-    response::{IntoResponse, Response},
+    http::{HeaderValue, StatusCode},
+    response::Response,
 };
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
-use crate::config::Config;
+use crate::{config::Config, openai::OpenAiErrorEnvelope};
 
 pub const FORCE_500: &str = "force_500";
+pub const FORCE_429: &str = "force_429";
 pub const MALFORMED_TOOL_CALL_JSON: &str = "malformed_tool_call_json";
+
+pub fn is_supported_scenario(name: &str) -> bool {
+    matches!(name, FORCE_500 | FORCE_429 | MALFORMED_TOOL_CALL_JSON)
+}
 
 /// Control flow for a single proxied request.
 #[derive(Debug)]
@@ -35,6 +40,7 @@ pub enum Action {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Scenario {
     Force500,
+    Force429,
     MalformedToolCallJson,
 }
 
@@ -42,6 +48,7 @@ impl Scenario {
     fn from_name(name: &str) -> Option<Self> {
         match name {
             FORCE_500 => Some(Self::Force500),
+            FORCE_429 => Some(Self::Force429),
             MALFORMED_TOOL_CALL_JSON => Some(Self::MalformedToolCallJson),
             _ => None,
         }
@@ -50,6 +57,7 @@ impl Scenario {
     fn name(self) -> &'static str {
         match self {
             Self::Force500 => FORCE_500,
+            Self::Force429 => FORCE_429,
             Self::MalformedToolCallJson => MALFORMED_TOOL_CALL_JSON,
         }
     }
@@ -59,6 +67,10 @@ impl Scenario {
             Self::Force500 => Action::ShortCircuit {
                 scenario: FORCE_500,
                 response: force_500_response(),
+            },
+            Self::Force429 => Action::ShortCircuit {
+                scenario: FORCE_429,
+                response: force_429_response(),
             },
             Self::MalformedToolCallJson => Action::MutateAfter {
                 scenario: MALFORMED_TOOL_CALL_JSON,
@@ -110,9 +122,19 @@ impl FaultEngine {
 }
 
 fn force_500_response() -> Response {
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        "maul: injected fault force_500",
+    OpenAiErrorEnvelope::new("maul: injected fault force_500", "server_error", FORCE_500)
+        .into_response(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn force_429_response() -> Response {
+    let mut response = OpenAiErrorEnvelope::new(
+        "maul: injected fault force_429",
+        "rate_limit_error",
+        FORCE_429,
     )
-        .into_response()
+    .into_response(StatusCode::TOO_MANY_REQUESTS);
+    response
+        .headers_mut()
+        .insert("retry-after", HeaderValue::from_static("1"));
+    response
 }

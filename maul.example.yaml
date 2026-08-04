@@ -5,7 +5,7 @@
 # maul.yaml is gitignored — keep local overrides and secrets out of the repo.
 # The API key is NOT configured here; clients send it via Authorization.
 
-proxy_listen: "0.0.0.0:7777"
+proxy_listen: "127.0.0.1:7777"
 
 # OpenAI-compatible upstream only (v0.1). Examples:
 #   https://api.openai.com
@@ -15,6 +15,7 @@ upstream_base_url: "https://api.openai.com"
 
 # Active fault scenarios. Supported today:
 #   force_500 — ShortCircuit with HTTP 500 (never calls upstream)
+#   force_429 — ShortCircuit with HTTP 429 and Retry-After (never calls upstream)
 #   malformed_tool_call_json — MutateAfter: corrupt tool_calls[].function.arguments
 scenarios: []
 
@@ -28,3 +29,10 @@ seed: 42
 budget:
   max_llm_calls: 100
   max_cost_usd: 5.0
+
+# Optional pricing overrides for OpenAI-compatible or custom model IDs.
+# Values are USD per one million tokens.
+# model_prices:
+#   custom-model:
+#     input_usd_per_million: 0.25
+#     output_usd_per_million: 1.50
