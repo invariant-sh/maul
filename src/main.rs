@@ -170,20 +170,24 @@ async fn run_test(args: TestArgs) -> Result<(), TestError> {
         Err(_) => {
             let _ = agent.kill().await;
             terminate_child(&mut proxy).await?;
+            // Still publish whatever evidence the proxy flushed before exit.
+            match publish_generated_report(&run_dir, &args.report) {
+                Ok(()) => tracing::warn!(
+                    path = %args.report.display(),
+                    "agent timed out; published partial reliability report"
+                ),
+                Err(error) => tracing::warn!(
+                    %error,
+                    "agent timed out; reliability report was not available to publish"
+                ),
+            }
             remove_run_directory(&run_dir);
             return Err(TestError::AgentTimedOut(args.timeout_secs));
         }
     };
     terminate_child(&mut proxy).await?;
 
-    let generated_report = run_dir.join("reliability_report.json");
-    if !generated_report.exists() {
-        remove_run_directory(&run_dir);
-        return Err(TestError::MissingReport(
-            generated_report.display().to_string(),
-        ));
-    }
-    publish_report(&generated_report, &args.report)?;
+    publish_generated_report(&run_dir, &args.report)?;
     let report: report::ReliabilityReport =
         serde_json::from_str(&fs::read_to_string(&args.report)?)?;
     remove_run_directory(&run_dir);
@@ -192,6 +196,17 @@ async fn run_test(args: TestArgs) -> Result<(), TestError> {
         return Err(TestError::AgentFailed(format_exit_status(agent_result)));
     }
     evaluate_thresholds(&report, &args.fail_on)?;
+    Ok(())
+}
+
+fn publish_generated_report(run_dir: &Path, destination: &Path) -> Result<(), TestError> {
+    let generated_report = run_dir.join("reliability_report.json");
+    if !generated_report.exists() {
+        return Err(TestError::MissingReport(
+            generated_report.display().to_string(),
+        ));
+    }
+    publish_report(&generated_report, destination)?;
     Ok(())
 }
 
