@@ -110,7 +110,7 @@ jobs:
         run: python3 ci/assert_report.py artifacts/release-dogfood.json --expect recovered
 
       - name: Publish release
-        uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
           generate_release_notes: true
           files: |
