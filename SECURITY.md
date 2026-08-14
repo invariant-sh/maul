@@ -17,7 +17,7 @@ It is **not** a public edge proxy, API gateway, or production policy layer. Do n
 If you believe you found a security issue in Maul:
 
 1. **Do not** open a public GitHub issue with exploit details.
-2. Email the maintainers via the contact listed on the [Invariant](https://github.com/invariant-sh) org profile, or open a **private** security advisory on GitHub if enabled for this repo.
+2. Open a [private security advisory](https://github.com/invariant-sh/maul/security/advisories/new) on this repository.
 3. Include: Maul version/commit, reproduction steps, and impact.
 
 We aim to acknowledge reports within a few business days.
