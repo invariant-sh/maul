@@ -274,7 +274,7 @@ CrewAI/LangGraph often stream by default.
 | **crates.io** | Rust library/binary registry (“packages”) | Later, once LICENSE + API are stable |
 | **GitHub Packages** | GH’s generic package host | Usually skip for Rust CLIs |
 
-Install from source: `cargo install --git https://github.com/invariant-sh/maul.git --tag v0.1.0`. GitHub Releases publish tagged binaries. crates.io comes later, once the library API is stable.
+Install from source: `cargo install --git https://github.com/invariant-sh/maul.git --tag v0.1.0-alpha.1`. GitHub Releases publish tagged binaries. crates.io comes later, once the library API is stable.
 
 ---
 
@@ -293,5 +293,3 @@ Part of [Invariant Labs](https://github.com/invariant-sh) — [getinvariant.sh](
 | **Maul** (this repo) | Adversarial proxy — find failures |
 | **[Holds](https://github.com/invariant-sh/holds)** | Eval harness — measure task quality |
 | **[Vigil](https://github.com/invariant-sh/vigil)** | Runtime policy SDK — prevent incidents and spend |
-
-Install from source: `cargo install --git https://github.com/invariant-sh/maul.git`.
