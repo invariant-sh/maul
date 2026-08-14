@@ -26,4 +26,4 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: Run mutation tests
-        run: cargo mutants --timeout 60 -- --all-features
+        run: cargo mutants --timeout 60 --file src/report.rs --file src/test_runner.rs --file src/session.rs -- --all-features

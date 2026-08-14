@@ -31,7 +31,8 @@ use maul::pricing::PricingRegistry;
 use maul::proxy::{self, ProxyState};
 use maul::report;
 use maul::test_runner::{
-    AGENT_BASE_URL_ENV, agent_base_url, evaluate_thresholds, publish_report, write_test_config,
+    AGENT_BASE_URL_ENV, AGENT_RUN_ENV, AGENT_SESSION_ENV, agent_base_url, evaluate_thresholds,
+    publish_report, write_test_config,
 };
 
 #[derive(Debug, Parser)]
@@ -139,10 +140,13 @@ async fn run_test(args: TestArgs) -> Result<(), TestError> {
     let config_path = run_dir.join("maul.yaml");
     write_test_config(&args.config, &config_path, &address)?;
 
+    let run_id = format!("maul-{}", std::process::id());
+    let session_id = format!("{run_id}-session");
     let executable = std::env::current_exe()?;
     let mut proxy = Command::new(executable)
         .arg("--config")
         .arg(&config_path)
+        .env(AGENT_RUN_ENV, &run_id)
         .current_dir(&run_dir)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
@@ -160,7 +164,8 @@ async fn run_test(args: TestArgs) -> Result<(), TestError> {
         .arg(&args.agent)
         .env(AGENT_BASE_URL_ENV[0], &base_url)
         .env(AGENT_BASE_URL_ENV[1], &base_url)
-        .env("MAUL_RUN_ID", format!("maul-{}", std::process::id()))
+        .env(AGENT_RUN_ENV, &run_id)
+        .env(AGENT_SESSION_ENV, &session_id)
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .spawn()?;

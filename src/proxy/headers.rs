@@ -2,6 +2,8 @@ use reqwest::header::{
     ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue,
 };
 
+use crate::session::SESSION_HEADER;
+
 /// RFC 7230 hop-by-hop / connection-local names (lowercase, as `HeaderName::as_str`).
 pub const HOP_BY_HOP: &[&str] = &[
     "connection",
@@ -41,6 +43,10 @@ pub fn prepare_upstream_request_headers(headers: HeaderMap) -> HeaderMap {
     let mut out = strip_content_length(hop_by_hop_filter(headers));
     out.remove(ACCEPT_ENCODING);
     out.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
+    // Maul-internal correlation only; never forward to the provider.
+    if let Ok(name) = HeaderName::from_bytes(SESSION_HEADER.as_bytes()) {
+        out.remove(name);
+    }
     out
 }
 

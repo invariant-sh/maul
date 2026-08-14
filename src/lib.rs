@@ -7,5 +7,6 @@ pub mod openai;
 pub mod pricing;
 pub mod proxy;
 pub mod report;
+pub mod session;
 pub mod test_runner;
 pub mod usage;

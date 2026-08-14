@@ -1,0 +1,32 @@
+name: Setup Maul
+description: Install a checksum-verified Maul release binary, or reuse a local build.
+author: Invariant Labs
+
+inputs:
+  version:
+    description: Pinned Maul release tag (for example v0.1.0). Do not use latest.
+    required: false
+    default: ""
+  binary-path:
+    description: Existing maul binary to put on PATH instead of downloading a release.
+    required: false
+    default: ""
+
+outputs:
+  maul-path:
+    description: Absolute path to the maul binary.
+    value: ${{ steps.install.outputs.maul-path }}
+  version:
+    description: Installed version tag, or local when binary-path is used.
+    value: ${{ steps.install.outputs.version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Maul
+      id: install
+      shell: bash
+      env:
+        MAUL_VERSION: ${{ inputs.version }}
+        MAUL_BINARY_PATH: ${{ inputs.binary-path }}
+      run: bash "${{ github.action_path }}/install.sh"

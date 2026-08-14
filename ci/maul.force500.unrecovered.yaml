@@ -1,0 +1,10 @@
+# Every request is force_500. Used to prove the GitHub Action blocks on
+# --fail-on resilience when a session never recovers.
+proxy_listen: "127.0.0.1:7777"
+upstream_base_url: "http://127.0.0.1:18776"
+scenarios: [force_500]
+probability: 1.0
+seed: 42
+budget:
+  max_llm_calls: 20
+  max_cost_usd: 1.0

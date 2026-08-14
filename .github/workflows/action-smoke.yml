@@ -1,0 +1,87 @@
+name: Action smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  recovered:
+    name: Dogfood recovered session
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+
+      - name: Build Maul
+        run: cargo build --locked
+
+      - name: Start fake OpenAI upstream
+        run: |
+          python3 ci/fake_openai.py &
+          for _ in $(seq 1 50); do
+            if python3 -c "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:18776/', method='POST', data=b'{}', headers={'Content-Type':'application/json'}), timeout=0.2)"; then
+              exit 0
+            fi
+            sleep 0.1
+          done
+          echo "fake OpenAI did not become ready"
+          exit 1
+
+      - name: Run maul-test action
+        uses: ./.github/actions/maul-test
+        with:
+          binary-path: ${{ github.workspace }}/target/debug/maul
+          config: ci/maul.force500.yaml
+          agent: python3 ci/retry_agent.py
+          report: artifacts/reliability_report.json
+          fail-on: resilience
+          artifact-name: maul-smoke-recovered
+
+      - name: Assert session-aware report
+        run: python3 ci/assert_report.py artifacts/reliability_report.json --expect recovered
+
+  unrecovered-gate:
+    name: Dogfood resilience gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1 # v2.8.1
+
+      - name: Build Maul
+        run: cargo build --locked
+
+      - name: Run maul-test action
+        id: maul
+        continue-on-error: true
+        uses: ./.github/actions/maul-test
+        with:
+          binary-path: ${{ github.workspace }}/target/debug/maul
+          config: ci/maul.force500.unrecovered.yaml
+          agent: python3 ci/retry_agent.py
+          report: artifacts/unrecovered.json
+          fail-on: resilience
+          artifact-name: maul-smoke-unrecovered
+
+      - name: Assert the action blocked on resilience
+        run: test "${{ steps.maul.outcome }}" = "failure"
+
+      - name: Assert unrecovered report contract
+        run: python3 ci/assert_report.py artifacts/unrecovered.json --expect unrecovered

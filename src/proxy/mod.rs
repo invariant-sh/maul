@@ -29,6 +29,7 @@ use crate::{
     openai::{OpenAiErrorEnvelope, classify_billable_route},
     pricing::PricingRegistry,
     report::{BudgetDecision, RequestObservation},
+    session,
     usage::{
         UsageOutcome, UsageUnavailableReason,
         json::extract_usage,
@@ -63,8 +64,16 @@ pub async fn handle(state: &ProxyState, req: Request) -> Response {
         .unwrap_or_else(|| "/".to_owned());
 
     if classify_billable_route(req.method(), req.uri()).is_none() {
+        let session_id = session::from_headers(req.headers()).map(session::SessionId::into_string);
         let response = reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
-        record_request(state, path, started, response.status().as_u16(), None);
+        record_request(
+            state,
+            path,
+            started,
+            response.status().as_u16(),
+            None,
+            session_id,
+        );
         return response;
     }
 
@@ -77,10 +86,15 @@ fn record_request(
     started: Instant,
     status: u16,
     fault: Option<String>,
+    session_id: Option<String>,
 ) {
-    state
-        .report
-        .record_request(path, status, started.elapsed().as_millis() as u64, fault);
+    state.report.record_request_with_session(
+        path,
+        status,
+        started.elapsed().as_millis() as u64,
+        fault,
+        session_id,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -95,6 +109,7 @@ pub(crate) fn record_billable(
     budget_decision: BudgetDecision,
     usage: Option<UsageOutcome>,
     cost_usd: Option<MicroUsd>,
+    session_id: Option<String>,
 ) {
     state.report.record(RequestObservation::billable(
         path,
@@ -106,6 +121,7 @@ pub(crate) fn record_billable(
         budget_decision,
         usage,
         cost_usd,
+        session_id,
     ));
 }
 

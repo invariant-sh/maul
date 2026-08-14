@@ -44,7 +44,8 @@ Part of [Invariant Labs](https://github.com/invariant-sh). Site: [getinvariant.s
 | `reliability_report.json` on shutdown | ✅ |
 | `max_llm_calls` and observed cost budgets | ✅ |
 | `maul test` CI orchestration | ✅ |
-| Session correlation and inferred recovery scoring | 🚧 planned |
+| Session correlation and session-aware recovery scoring | ✅ |
+| GitHub Action merge gate (`setup-maul` / `maul-test`) | ✅ |
 | Control plane (`/__maul/*`) + Python CLI | 🚧 planned |
 
 ---
@@ -140,7 +141,7 @@ Only `POST /v1/chat/completions` consumes the call budget. `max_cost_usd` is an 
 ## Roadmap
 
 1. ~~Proxy, deterministic faults, budgets, versioned report, and `maul test`~~ — done for v0.1
-2. **Session correlation** — make retry/recovery summaries attributable to a run
+2. ~~Session correlation~~ — retries are attributed per session; recovery is scored only within that session
 3. **Scenario packs** — request-side tool-result poisoning and additional response faults
 4. **Control plane** — `/__maul/run|report|reset` for long-lived local sessions
 5. **Provider adapters** — native protocols beyond OpenAI-compatible HTTP
@@ -153,6 +154,7 @@ Maul measures **behavior under failure**. Task correctness belongs in **Holds** 
 
 - Treat Maul as a **local / CI chaos tool**, not a public edge proxy.
 - Maul **forwards** `Authorization`; **never log** that header (or bodies that may contain secrets).
+- `X-Maul-Session-Id` is stripped before upstream forwarding. It is correlation, not a credential.
 - Keep real keys in the environment; do not commit `maul.yaml` with sensitive overrides.
 
 See [`SECURITY.md`](./SECURITY.md) for the full policy and how to report vulnerabilities.
@@ -187,8 +189,10 @@ tests/
   openai.rs          # route, model, and error-envelope contracts
   pipeline.rs        # budget/fault/usage end-to-end behavior
   pricing.rs         # registry and override behavior
-  properties.rs      # cost and transform properties
-  report.rs          # collector flush → JSON
+  properties.rs      # cost, transform, and session-recovery properties
+  report.rs          # collector flush → JSON, schema 0.1/0.2 compatibility
+  aggregation.rs     # session-aware recovery scoring
+  session.rs         # header/body session extraction
   reverse_proxy.rs   # pass-through + identity encoding vs wiremock
   usage.rs           # JSON/SSE usage and request transforms
 ```
@@ -240,16 +244,65 @@ maul test \
   --fail-on resilience,cost
 ```
 
-The command sets `MAUL_BASE_URL` and `OPENAI_BASE_URL`, uses an ephemeral loopback port, flushes the same report artifact, and distinguishes agent failures from threshold failures. It does not capture prompts or credentials by default.
+The command sets `MAUL_BASE_URL`, `OPENAI_BASE_URL`, `MAUL_RUN_ID`, and `MAUL_SESSION_ID`, uses an ephemeral loopback port, flushes the same report artifact, and distinguishes agent failures from threshold failures. It does not capture prompts or credentials by default.
+
+`--fail-on resilience` fails only when a **faulted session** has no later same-session recovery. Unattributed traffic is counted separately and is not treated as a failed session.
+
+### Session attribution
+
+Maul attributes requests with this priority:
+
+1. `X-Maul-Session-Id` header (stripped before the provider sees it)
+2. OpenAI-compatible JSON `user`
+3. JSON `metadata.maul_session_id`
+4. Unattributed (`session_id: null`)
+
+Identifiers are bounded (1–128 bytes, no whitespace or control characters). An invalid dedicated header does not fall through to body fields.
+
+```python
+import os
+from openai import OpenAI
+
+session = os.environ["MAUL_SESSION_ID"]
+client = OpenAI(
+    base_url=os.environ["MAUL_BASE_URL"],
+    api_key=os.environ["OPENAI_API_KEY"],
+    default_headers={"X-Maul-Session-Id": session},
+)
+```
+
+A later 2xx in the **same** session recovers `force_500` / `force_429`. For `malformed_tool_call_json`, the later 2xx must be un-faulted. A success in session B never recovers a fault in session A.
+
+### GitHub Action merge gate
+
+Pin the action **and** the binary to the same release tag. Do not use `latest`.
+
+```yaml
+permissions:
+  contents: read
+
+jobs:
+  maul:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: invariant-sh/maul/.github/actions/maul-test@v0.1.0
+        with:
+          version: v0.1.0
+          config: maul.yaml
+          agent: python app/agent.py
+          report: artifacts/reliability_report.json
+          fail-on: resilience,cost
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+```
+
+Supported runners: Linux x86_64 and macOS arm64. The action verifies the published SHA256, caches the binary, uploads JSON and Markdown reports (default retention 7 days), and appends the Markdown summary to `$GITHUB_STEP_SUMMARY`. Provider secrets stay in the spawned agent environment; they are never written to config, outputs, or reports.
+
+Fork PRs should not receive repository provider secrets. Use the credential-free `ci/` fixture for public dogfood.
 
 ## Report artifact
 
-The report uses schema version `0.1` and separates `total_proxy_requests` from
-`billable_llm_calls`. Each request record includes its admission decision, model,
-fault, usage outcome, and integer `cost_usd` in micro-USD. The top-level report
-also includes the budget snapshot, pricing registry version, and a process-run
-summary. Maul does not infer task correctness or claim per-agent recovery
-without session correlation; those responsibilities belong to Holds.
+The report uses schema version `0.2` (additive over `0.1`; old fixtures still deserialize). Each request record includes an optional `session_id` and a monotonic proxy `sequence`. The summary reports fault events, recovery events (`post_fault_successes` is a compatibility alias), recovered/unrecovered sessions, and unattributed requests. Maul does not infer task correctness; that belongs to Holds. JSON Schema: [`schemas/reliability_report.v0.2.schema.json`](./schemas/reliability_report.v0.2.schema.json).
 
 ### Demo `malformed_tool_call_json`
 

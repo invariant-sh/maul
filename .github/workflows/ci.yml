@@ -42,6 +42,11 @@ jobs:
       - name: Validate example configuration
         run: cargo run -- --config maul.example.yaml --validate
 
+      - name: Lint GitHub Actions
+        run: |
+          bash <(curl --retry 3 -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.7/scripts/download-actionlint.bash) 1.7.7
+          ./actionlint -color
+
       - name: Dependency audit
         uses: EmbarkStudios/cargo-deny-action@175dc7fd4fb85ec8f46948fb98f44db001149081 # v2.0.16
         with:

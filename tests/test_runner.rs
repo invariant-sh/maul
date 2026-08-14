@@ -1,10 +1,11 @@
 //! Unit tests for `maul test` orchestration helpers.
 
 use maul::budget::{BudgetSnapshot, MicroUsd};
-use maul::report::{ReliabilityReport, RunSummary};
+use maul::report::{ReliabilityReport, RequestRecord, RunSummary};
 use maul::test_runner::{
-    AGENT_BASE_URL_ENV, DEFAULT_AGENT_TIMEOUT_SECS, TestOrchestrationError, agent_base_url,
-    evaluate_thresholds, publish_report, render_report_summary, write_test_config,
+    AGENT_BASE_URL_ENV, AGENT_RUN_ENV, AGENT_SESSION_ENV, DEFAULT_AGENT_TIMEOUT_SECS,
+    TestOrchestrationError, agent_base_url, evaluate_thresholds, publish_report,
+    render_report_summary, write_test_config,
 };
 use tempfile::tempdir;
 
@@ -15,9 +16,12 @@ fn report_with(
     observed_cost_usd: MicroUsd,
     cost_limit_usd: MicroUsd,
 ) -> ReliabilityReport {
+    let requests = resilience_requests(faults_injected, post_fault_successes);
+    let summary = maul::report::summarize(&requests);
     ReliabilityReport {
-        schema_version: "0.1".into(),
-        total_proxy_requests: 2,
+        schema_version: "0.2".into(),
+        run_id: "test-run".into(),
+        total_proxy_requests: requests.len() as u64,
         billable_llm_calls: 1,
         faults_injected,
         average_latency_ms: 1.0,
@@ -29,20 +33,44 @@ fn report_with(
         }),
         pricing_registry_version: Some("test".into()),
         summary: RunSummary {
-            successful_requests: 1,
-            failed_requests: 1,
             budget_rejections,
-            post_fault_successes,
             observed_cost_usd,
+            ..summary
         },
-        requests: Vec::new(),
+        sessions: maul::report::aggregate_sessions(&requests).sessions,
+        requests,
     }
+}
+
+fn resilience_requests(faults_injected: u64, post_fault_successes: u64) -> Vec<RequestRecord> {
+    let mut requests = Vec::new();
+    if faults_injected == 0 {
+        return requests;
+    }
+    requests.push(RequestRecord {
+        status: 500,
+        fault_injected: Some("force_500".into()),
+        session_id: Some("session-a".into()),
+        sequence: 1,
+        ..RequestRecord::default()
+    });
+    if post_fault_successes > 0 {
+        requests.push(RequestRecord {
+            status: 200,
+            session_id: Some("session-a".into()),
+            sequence: 2,
+            ..RequestRecord::default()
+        });
+    }
+    requests
 }
 
 #[test]
 fn agent_base_url_uses_openai_compatible_suffix() {
     assert_eq!(agent_base_url("127.0.0.1:9876"), "http://127.0.0.1:9876/v1");
     assert_eq!(AGENT_BASE_URL_ENV, &["MAUL_BASE_URL", "OPENAI_BASE_URL"]);
+    assert_eq!(AGENT_RUN_ENV, "MAUL_RUN_ID");
+    assert_eq!(AGENT_SESSION_ENV, "MAUL_SESSION_ID");
     assert_eq!(DEFAULT_AGENT_TIMEOUT_SECS, 300);
 }
 
@@ -69,7 +97,7 @@ fn evaluate_thresholds_detects_budget_cost_and_resilience_failures() {
     let budget_fail = report_with(0, 1, 0, MicroUsd::ZERO, MicroUsd::ZERO);
     assert!(matches!(
         evaluate_thresholds(&budget_fail, &["budget".into()]),
-        Err(TestOrchestrationError::ThresholdFailed(name)) if name == "budget"
+        Err(TestOrchestrationError::ThresholdFailed { name, .. }) if name == "budget"
     ));
 
     let cost_fail = report_with(
@@ -81,14 +109,17 @@ fn evaluate_thresholds_detects_budget_cost_and_resilience_failures() {
     );
     assert!(matches!(
         evaluate_thresholds(&cost_fail, &["cost".into()]),
-        Err(TestOrchestrationError::ThresholdFailed(name)) if name == "cost"
+        Err(TestOrchestrationError::ThresholdFailed { name, .. }) if name == "cost"
     ));
 
     let resilience_fail = report_with(2, 0, 0, MicroUsd::ZERO, MicroUsd::ZERO);
-    assert!(matches!(
-        evaluate_thresholds(&resilience_fail, &["resilience".into()]),
-        Err(TestOrchestrationError::ThresholdFailed(name)) if name == "resilience"
-    ));
+    match evaluate_thresholds(&resilience_fail, &["resilience".into()]) {
+        Err(TestOrchestrationError::ThresholdFailed { name, detail }) => {
+            assert_eq!(name, "resilience");
+            assert!(detail.contains("1 faulted session"));
+        }
+        other => panic!("expected resilience threshold failure, got {other:?}"),
+    }
 
     let ok = report_with(
         1,
@@ -100,6 +131,21 @@ fn evaluate_thresholds_detects_budget_cost_and_resilience_failures() {
     assert!(
         evaluate_thresholds(&ok, &["budget".into(), "cost".into(), "resilience".into()]).is_ok()
     );
+}
+
+#[test]
+fn resilience_does_not_fail_on_unattributed_faults() {
+    let report = report_with(0, 0, 0, MicroUsd::ZERO, MicroUsd::ZERO);
+    let mut report = report;
+    report.faults_injected = 1;
+    report.requests = vec![RequestRecord {
+        status: 500,
+        fault_injected: Some("force_500".into()),
+        session_id: None,
+        sequence: 1,
+        ..RequestRecord::default()
+    }];
+    assert!(evaluate_thresholds(&report, &["resilience".into()]).is_ok());
 }
 
 #[test]
@@ -129,7 +175,8 @@ fn publish_report_writes_json_copy_and_markdown_summary() {
     assert!(destination.exists());
     assert!(summary_path.exists());
     let summary = std::fs::read_to_string(summary_path).unwrap();
-    assert!(summary.contains("Faults injected: 1"));
+    assert!(summary.contains("Fault events: 1"));
+    assert!(summary.contains("Recovery events: 1"));
     assert!(summary.contains("$1.500000"));
     assert!(summary.contains("1500000"));
 }

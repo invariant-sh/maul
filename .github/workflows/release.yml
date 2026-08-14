@@ -54,14 +54,65 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Download archives
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
 
+      - name: Verify checksums and extract the Linux binary
+        id: extract
+        shell: bash
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          checksums=(dist/*.sha256)
+          if [[ ${#checksums[@]} -eq 0 ]]; then
+            echo "No SHA256 files found in dist/"
+            exit 1
+          fi
+          (
+            cd dist
+            sha256sum -c ./*.sha256
+          )
+          archive="dist/maul-${GITHUB_REF_NAME}-x86_64-unknown-linux-gnu.tar.gz"
+          mkdir -p "${RUNNER_TEMP}/maul-release"
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}/maul-release" --strip-components=1
+          chmod +x "${RUNNER_TEMP}/maul-release/maul"
+          echo "maul-path=${RUNNER_TEMP}/maul-release/maul" >> "${GITHUB_OUTPUT}"
+
+      - name: Start fake OpenAI upstream
+        run: |
+          python3 ci/fake_openai.py &
+          for _ in $(seq 1 50); do
+            if python3 -c "import urllib.request; urllib.request.urlopen(urllib.request.Request('http://127.0.0.1:18776/', method='POST', data=b'{}', headers={'Content-Type':'application/json'}), timeout=0.2)"; then
+              exit 0
+            fi
+            sleep 0.1
+          done
+          echo "fake OpenAI did not become ready"
+          exit 1
+
+      - name: Run maul-test against the release asset
+        uses: ./.github/actions/maul-test
+        with:
+          binary-path: ${{ steps.extract.outputs.maul-path }}
+          version: ${{ github.ref_name }}
+          config: ci/maul.force500.yaml
+          agent: python3 ci/retry_agent.py
+          report: artifacts/release-dogfood.json
+          fail-on: resilience
+          artifact-name: maul-release-dogfood
+
+      - name: Assert release dogfood report
+        run: python3 ci/assert_report.py artifacts/release-dogfood.json --expect recovered
+
       - name: Publish release
         uses: softprops/action-gh-release@72f2c25fcb47643c292f7107632f7a47c1df5cd8 # v2.3.2
         with:
           generate_release_notes: true
-          files: dist/*
+          files: |
+            dist/*.tar.gz
+            dist/*.sha256
