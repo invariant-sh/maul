@@ -7,7 +7,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode};
 use maul::budget::{BudgetLimits, BudgetTracker, MicroUsd};
 use maul::config::{Budget, Config};
-use maul::fault::{FORCE_429, FaultEngine, MALFORMED_TOOL_CALL_JSON};
+use maul::fault::{FORCE_429, FORCE_500, FaultEngine, MALFORMED_TOOL_CALL_JSON};
 use maul::pricing::PricingRegistry;
 use maul::proxy::{ProxyState, handle};
 use maul::report::{BudgetDecision, ReliabilityReport, spawn_collector};
@@ -40,12 +40,23 @@ fn fixture(
     max_llm_calls: u64,
     max_cost_usd: u64,
 ) -> PipelineFixture {
+    fixture_with(upstream, scenarios, max_llm_calls, max_cost_usd, 1.0, 42)
+}
+
+fn fixture_with(
+    upstream: &str,
+    scenarios: Vec<&str>,
+    max_llm_calls: u64,
+    max_cost_usd: u64,
+    probability: f64,
+    seed: u64,
+) -> PipelineFixture {
     let config = Config {
         proxy_listen: "127.0.0.1:7777".into(),
         upstream_base_url: upstream.into(),
         scenarios: scenarios.into_iter().map(str::to_owned).collect(),
-        probability: 1.0,
-        seed: 42,
+        probability,
+        seed,
         budget: Budget {
             max_llm_calls,
             max_cost_usd: MicroUsd::from_micro_usd(max_cost_usd),
@@ -97,12 +108,26 @@ fn completion_request(stream: bool) -> Request<Body> {
 }
 
 fn completion_request_for_model(model: &str, stream: bool) -> Request<Body> {
-    Request::builder()
+    completion_request_with(model, stream, None, None)
+}
+
+fn completion_request_with(
+    model: &str,
+    stream: bool,
+    session_header: Option<&str>,
+    body_extra: Option<&str>,
+) -> Request<Body> {
+    let extra = body_extra.unwrap_or("");
+    let mut builder = Request::builder()
         .method("POST")
         .uri("/v1/chat/completions")
-        .header("content-type", "application/json")
+        .header("content-type", "application/json");
+    if let Some(session) = session_header {
+        builder = builder.header("x-maul-session-id", session);
+    }
+    builder
         .body(Body::from(format!(
-            r#"{{"model":"{model}","stream":{stream}}}"#
+            r#"{{"model":"{model}","stream":{stream}{extra}}}"#
         )))
         .expect("request")
 }
@@ -399,4 +424,217 @@ async fn mutate_after_streaming_records_pristine_usage_and_cost() {
         report.requests[0].fault_injected.as_deref(),
         Some(MALFORMED_TOOL_CALL_JSON)
     );
+}
+
+fn seed_for_fault_pattern(pattern: &[bool]) -> u64 {
+    for seed in 0..50_000 {
+        let config = Config {
+            proxy_listen: "127.0.0.1:7777".into(),
+            upstream_base_url: "http://127.0.0.1:1".into(),
+            scenarios: vec![FORCE_500.to_owned()],
+            probability: 0.5,
+            seed,
+            budget: Budget {
+                max_llm_calls: 100,
+                max_cost_usd: MicroUsd::ZERO,
+            },
+            model_prices: std::collections::HashMap::new(),
+        };
+        let engine = FaultEngine::from_config(&config);
+        let matches_pattern = pattern.iter().all(|&want_fault| {
+            matches!(engine.decide(), maul::fault::Action::ShortCircuit { .. }) == want_fault
+        });
+        if matches_pattern {
+            return seed;
+        }
+    }
+    panic!("no fault-engine seed produced pattern {pattern:?}");
+}
+
+#[tokio::test]
+async fn interleaved_sessions_only_recover_the_session_with_later_2xx() {
+    let seed = seed_for_fault_pattern(&[true, false, false]);
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"choices":[]}"#, "application/json"),
+        )
+        .expect(2)
+        .mount(&upstream)
+        .await;
+    let fixture = fixture_with(&upstream.uri(), vec![FORCE_500], 10, 0, 0.5, seed);
+
+    let first = handle(
+        &fixture.state,
+        completion_request_with("gpt-4o-mini", false, Some("session-a"), None),
+    )
+    .await;
+    assert_eq!(first.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    let second = handle(
+        &fixture.state,
+        completion_request_with("gpt-4o-mini", false, Some("session-b"), None),
+    )
+    .await;
+    assert_eq!(second.status(), StatusCode::OK);
+    let _ = to_bytes(second.into_body(), 1024 * 1024).await.unwrap();
+
+    let third = handle(
+        &fixture.state,
+        completion_request_with("gpt-4o-mini", false, Some("session-a"), None),
+    )
+    .await;
+    assert_eq!(third.status(), StatusCode::OK);
+    let _ = to_bytes(third.into_body(), 1024 * 1024).await.unwrap();
+
+    let report = flush_report(fixture).await;
+    assert_eq!(report.schema_version, "0.2");
+    assert_eq!(report.summary.recovery_events, 1);
+    assert_eq!(report.summary.recovered_sessions, 1);
+    assert_eq!(report.summary.unrecovered_sessions, 0);
+    let session_a = report
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session-a")
+        .expect("session a");
+    let session_b = report
+        .sessions
+        .iter()
+        .find(|session| session.session_id == "session-b")
+        .expect("session b");
+    assert_eq!(session_a.recovered, Some(true));
+    assert_eq!(session_b.recovered, None);
+}
+
+#[tokio::test]
+async fn mutate_after_repeated_2xx_is_not_a_false_recovery() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"choices":[]}"#, "application/json"),
+        )
+        .expect(2)
+        .mount(&upstream)
+        .await;
+    let fixture = fixture(&upstream.uri(), vec![MALFORMED_TOOL_CALL_JSON], 10, 0);
+
+    for _ in 0..2 {
+        let response = handle(
+            &fixture.state,
+            completion_request_with("gpt-4o-mini", false, Some("session-a"), None),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let _ = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    }
+
+    let report = flush_report(fixture).await;
+    assert_eq!(report.summary.fault_events, 2);
+    assert_eq!(report.summary.recovery_events, 0);
+    assert_eq!(report.summary.post_fault_successes, 0);
+    assert_eq!(report.summary.unrecovered_sessions, 1);
+}
+
+#[tokio::test]
+async fn missing_and_invalid_session_ids_are_unattributed() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"choices":[]}"#, "application/json"),
+        )
+        .expect(2)
+        .mount(&upstream)
+        .await;
+    let fixture = fixture_with(&upstream.uri(), vec![], 10, 0, 0.0, 1);
+
+    let missing = handle(&fixture.state, completion_request(false)).await;
+    assert_eq!(missing.status(), StatusCode::OK);
+    let _ = to_bytes(missing.into_body(), 1024 * 1024).await.unwrap();
+
+    let invalid = handle(
+        &fixture.state,
+        completion_request_with("gpt-4o-mini", false, Some("not a valid id"), None),
+    )
+    .await;
+    assert_eq!(invalid.status(), StatusCode::OK);
+    let _ = to_bytes(invalid.into_body(), 1024 * 1024).await.unwrap();
+
+    let report = flush_report(fixture).await;
+    assert!(
+        report
+            .requests
+            .iter()
+            .all(|record| record.session_id.is_none())
+    );
+    assert_eq!(report.summary.unattributed_requests, 2);
+    assert_eq!(report.summary.sessions_observed, 0);
+}
+
+#[tokio::test]
+async fn sse_pass_through_records_session_and_strips_internal_header() {
+    let upstream = MockServer::start().await;
+    let sse = concat!(
+        "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}],\"usage\":null}\n\n",
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":0,\"total_tokens\":4}}\n\n",
+        "data: [DONE]\n\n"
+    );
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(sse),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let fixture = fixture_with(&upstream.uri(), vec![], 10, 0, 0.0, 1);
+
+    let response = handle(
+        &fixture.state,
+        completion_request_with("gpt-4o-mini", true, Some("sse-session"), None),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("data: [DONE]"));
+
+    let received = upstream.received_requests().await.unwrap();
+    assert!(received[0].headers.get("x-maul-session-id").is_none());
+
+    let report = flush_report(fixture).await;
+    assert_eq!(report.requests.len(), 1);
+    assert_eq!(
+        report.requests[0].session_id.as_deref(),
+        Some("sse-session")
+    );
+    assert_eq!(report.schema_version, "0.2");
+}
+
+#[tokio::test]
+async fn body_user_field_attributes_session_when_header_is_absent() {
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/chat/completions"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw(br#"{"choices":[]}"#, "application/json"),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let fixture = fixture_with(&upstream.uri(), vec![], 10, 0, 0.0, 1);
+
+    let response = handle(
+        &fixture.state,
+        completion_request_with("gpt-4o-mini", false, None, Some(r#","user":"body-user""#)),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
+
+    let report = flush_report(fixture).await;
+    assert_eq!(report.requests[0].session_id.as_deref(), Some("body-user"));
 }

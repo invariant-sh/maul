@@ -25,6 +25,7 @@ use crate::fault::Action;
 use crate::openai::{ChatRequestMetadata, OpenAiErrorEnvelope};
 use crate::proxy::request_transform;
 use crate::report::BudgetDecision;
+use crate::session;
 use crate::usage::UsageOutcome;
 use crate::usage::sse::UsageCompletion;
 
@@ -34,6 +35,7 @@ struct ParsedBody {
     parts: Parts,
     value: Value,
     metadata: ChatRequestMetadata,
+    session_id: Option<String>,
 }
 
 struct PricedRequest {
@@ -41,6 +43,7 @@ struct PricedRequest {
     value: Value,
     metadata: ChatRequestMetadata,
     price: Option<Price>,
+    session_id: Option<String>,
 }
 
 struct AdmittedRequest {
@@ -49,6 +52,15 @@ struct AdmittedRequest {
     metadata: ChatRequestMetadata,
     price: Option<Price>,
     permit: CallPermit,
+    session_id: Option<String>,
+}
+
+struct TransformedRequest {
+    metadata: ChatRequestMetadata,
+    price: Option<Price>,
+    permit: CallPermit,
+    session_id: Option<String>,
+    request: Request,
 }
 
 /// Run the ordered billable pipeline for one already-classified chat completion.
@@ -70,11 +82,21 @@ pub async fn handle_billable(
         Ok(admitted) => admitted,
         Err(response) => return response,
     };
-    let (metadata, price, permit, req) = match transform_outbound(state, admitted, &path, started) {
+    let transformed = match transform_outbound(state, admitted, &path, started) {
         Ok(transformed) => transformed,
         Err(response) => return response,
     };
-    execute_and_meter(state, req, metadata, price, permit, path, started).await
+    execute_and_meter(
+        state,
+        transformed.request,
+        transformed.metadata,
+        transformed.price,
+        transformed.permit,
+        path,
+        started,
+        transformed.session_id,
+    )
+    .await
 }
 
 async fn read_and_parse_body(
@@ -84,6 +106,7 @@ async fn read_and_parse_body(
     started: Instant,
 ) -> Result<ParsedBody, Response> {
     let (parts, body) = req.into_parts();
+    let header_session = session::from_headers(&parts.headers).map(session::SessionId::into_string);
     let body = match to_bytes(body, MAX_REQUEST_BODY_BYTES).await {
         Ok(body) => body,
         Err(error) => {
@@ -94,7 +117,7 @@ async fn read_and_parse_body(
                 "request_body_too_large",
             )
             .into_response(StatusCode::PAYLOAD_TOO_LARGE);
-            record_invalid(state, path, started, &response);
+            record_invalid(state, path, started, &response, header_session);
             return Err(response);
         }
     };
@@ -109,7 +132,7 @@ async fn read_and_parse_body(
                 "invalid_json",
             )
             .into_response(StatusCode::BAD_REQUEST);
-            record_invalid(state, path, started, &response);
+            record_invalid(state, path, started, &response, header_session);
             return Err(response);
         }
     };
@@ -123,15 +146,19 @@ async fn read_and_parse_body(
                 "invalid_chat_request",
             )
             .into_response(StatusCode::BAD_REQUEST);
-            record_invalid(state, path, started, &response);
+            record_invalid(state, path, started, &response, header_session);
             return Err(response);
         }
     };
+
+    let session_id =
+        session::from_headers_and_body(&parts.headers, &value).map(session::SessionId::into_string);
 
     Ok(ParsedBody {
         parts,
         value,
         metadata,
+        session_id,
     })
 }
 
@@ -163,6 +190,7 @@ fn resolve_price(
             BudgetDecision::ModelUnpriced,
             None,
             None,
+            parsed.session_id,
         );
         return Err(response);
     }
@@ -172,6 +200,7 @@ fn resolve_price(
         value: parsed.value,
         metadata: parsed.metadata,
         price,
+        session_id: parsed.session_id,
     })
 }
 
@@ -201,6 +230,7 @@ fn admit_call(
                 BudgetDecision::CallCapExceeded,
                 None,
                 None,
+                priced.session_id,
             );
             return Err(response);
         }
@@ -222,6 +252,7 @@ fn admit_call(
                 BudgetDecision::CostCapExceeded,
                 None,
                 None,
+                priced.session_id,
             );
             return Err(response);
         }
@@ -237,6 +268,7 @@ fn admit_call(
         metadata: priced.metadata,
         price: priced.price,
         permit,
+        session_id: priced.session_id,
     })
 }
 
@@ -245,7 +277,7 @@ fn transform_outbound(
     mut admitted: AdmittedRequest,
     path: &str,
     started: Instant,
-) -> Result<(ChatRequestMetadata, Option<Price>, CallPermit, Request), Response> {
+) -> Result<TransformedRequest, Response> {
     if let Err(error) = request_transform::include_stream_usage(&mut admitted.value) {
         let response = OpenAiErrorEnvelope::new(
             error.to_string(),
@@ -264,6 +296,7 @@ fn transform_outbound(
             BudgetDecision::Allowed,
             None,
             None,
+            admitted.session_id,
         );
         return Err(response);
     }
@@ -289,19 +322,22 @@ fn transform_outbound(
                 BudgetDecision::Allowed,
                 None,
                 None,
+                admitted.session_id,
             );
             return Err(response);
         }
     };
 
-    Ok((
-        admitted.metadata,
-        admitted.price,
-        admitted.permit,
-        Request::from_parts(admitted.parts, Body::from(body)),
-    ))
+    Ok(TransformedRequest {
+        metadata: admitted.metadata,
+        price: admitted.price,
+        permit: admitted.permit,
+        session_id: admitted.session_id,
+        request: Request::from_parts(admitted.parts, Body::from(body)),
+    })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_and_meter(
     state: &ProxyState,
     req: Request,
@@ -310,6 +346,7 @@ async fn execute_and_meter(
     permit: CallPermit,
     path: String,
     started: Instant,
+    session_id: Option<String>,
 ) -> Response {
     match state.fault.decide() {
         Action::ShortCircuit { scenario, response } => {
@@ -324,14 +361,21 @@ async fn execute_and_meter(
                 BudgetDecision::Allowed,
                 None,
                 None,
+                session_id,
             );
             response
         }
         Action::MutateAfter { scenario } => {
-            execute_mutate_after(state, req, metadata, price, permit, path, started, scenario).await
+            execute_mutate_after(
+                state, req, metadata, price, permit, path, started, scenario, session_id,
+            )
+            .await
         }
         Action::Forward => {
-            execute_forward(state, req, metadata, price, permit, path, started).await
+            execute_forward(
+                state, req, metadata, price, permit, path, started, session_id,
+            )
+            .await
         }
     }
 }
@@ -346,6 +390,7 @@ async fn execute_mutate_after(
     path: String,
     started: Instant,
     scenario: &'static str,
+    session_id: Option<String>,
 ) -> Response {
     let upstream = reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
     // Streaming MutateAfter drains the body; capture tap completion so the
@@ -372,10 +417,12 @@ async fn execute_mutate_after(
         BudgetDecision::Allowed,
         usage,
         cost_usd,
+        session_id,
     );
     response
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_forward(
     state: &ProxyState,
     req: Request,
@@ -384,6 +431,7 @@ async fn execute_forward(
     permit: CallPermit,
     path: String,
     started: Instant,
+    session_id: Option<String>,
 ) -> Response {
     let response = reverse_proxy(&state.client, state.upstream_base_url.as_str(), req).await;
     if metadata.stream {
@@ -393,6 +441,7 @@ async fn execute_forward(
         let report_model = metadata.model.as_str().to_owned();
         let call_number = permit.call_number;
         let started_for_report = started;
+        let report_session = session_id.clone();
         let completion: UsageCompletion = Box::new(move |usage, cost_usd| {
             report.record_request_details(
                 report_path,
@@ -405,6 +454,7 @@ async fn execute_forward(
                 BudgetDecision::Allowed,
                 Some(usage),
                 cost_usd,
+                report_session,
             );
         });
         return meter_response(
@@ -430,6 +480,7 @@ async fn execute_forward(
         BudgetDecision::Allowed,
         metered.usage,
         metered.cost_usd,
+        session_id,
     );
     metered.response
 }
@@ -461,7 +512,13 @@ fn take_metered_outcome(
     (usage, cost_usd)
 }
 
-fn record_invalid(state: &ProxyState, path: &str, started: Instant, response: &Response) {
+fn record_invalid(
+    state: &ProxyState,
+    path: &str,
+    started: Instant,
+    response: &Response,
+    session_id: Option<String>,
+) {
     record_billable(
         state,
         path.to_owned(),
@@ -473,5 +530,6 @@ fn record_invalid(state: &ProxyState, path: &str, started: Instant, response: &R
         BudgetDecision::InvalidRequest,
         None,
         None,
+        session_id,
     );
 }

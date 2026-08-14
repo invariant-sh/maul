@@ -112,6 +112,19 @@ fn prepare_upstream_forces_accept_encoding_identity() {
 }
 
 #[test]
+fn prepare_upstream_strips_maul_session_header() {
+    let input = map_with(&[
+        ("authorization", "Bearer sk-test"),
+        ("x-maul-session-id", "run-1-session"),
+        ("content-type", "application/json"),
+    ]);
+
+    let out = prepare_upstream_request_headers(input);
+    assert!(out.get("x-maul-session-id").is_none());
+    assert_eq!(out.get(AUTHORIZATION).unwrap(), "Bearer sk-test");
+}
+
+#[test]
 fn prepare_response_strips_content_encoding() {
     let input = map_with(&[
         ("content-type", "application/json"),

@@ -30,6 +30,18 @@ fn assert_args_invalid_json(args: &str) {
 }
 
 #[test]
+fn ci_force500_seed_faults_then_forwards() {
+    // Keep in sync with ci/maul.force500.yaml.
+    const SEED: u64 = 5;
+    const PROBABILITY: f64 = 0.5;
+    let engine = FaultEngine::from_config(&config_with(vec![FORCE_500], PROBABILITY, SEED));
+    assert!(
+        matches!(engine.decide(), Action::ShortCircuit { scenario, .. } if scenario == FORCE_500)
+    );
+    assert!(matches!(engine.decide(), Action::Forward));
+}
+
+#[test]
 fn disabled_when_scenario_not_listed() {
     let engine = FaultEngine::from_config(&config_with(vec![], 1.0, 1));
     for _ in 0..20 {

@@ -7,3 +7,4 @@ maul.yaml
 
 # Generated on shutdown
 reliability_report.json
+/artifacts/

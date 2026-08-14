@@ -1,0 +1,10 @@
+# Deterministic CI fixture: first request is force_500, the same-session retry
+# is forwarded to ci/fake_openai.py. Seed 5 is locked by tests/fault.rs.
+proxy_listen: "127.0.0.1:7777"
+upstream_base_url: "http://127.0.0.1:18776"
+scenarios: [force_500]
+probability: 0.5
+seed: 5
+budget:
+  max_llm_calls: 20
+  max_cost_usd: 1.0

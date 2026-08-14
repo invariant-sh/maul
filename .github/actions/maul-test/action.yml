@@ -1,0 +1,160 @@
+name: Maul Test
+description: Run maul test and publish JSON/Markdown reliability reports.
+author: Invariant Labs
+
+inputs:
+  config:
+    description: Path to the Maul YAML configuration.
+    required: true
+  agent:
+    description: Trusted agent command executed against the Maul proxy.
+    required: true
+  report:
+    description: Destination path for reliability_report.json.
+    required: false
+    default: reliability_report.json
+  fail-on:
+    description: Comma-separated Maul thresholds (budget, cost, resilience).
+    required: false
+    default: ""
+  timeout-secs:
+    description: Maximum agent runtime in seconds.
+    required: false
+    default: "300"
+  version:
+    description: Pinned Maul release tag. Ignored when binary-path is set.
+    required: false
+    default: ""
+  openai-api-key:
+    description: Optional provider secret injected only into the agent environment.
+    required: false
+    default: ""
+  binary-path:
+    description: Existing maul binary, used by repo dogfood workflows.
+    required: false
+    default: ""
+  artifact-name:
+    description: Artifact name for the JSON and Markdown reports.
+    required: false
+    default: maul-reliability-report
+  artifact-retention-days:
+    description: Artifact retention in days. Keep short; reports can be sensitive.
+    required: false
+    default: "7"
+
+outputs:
+  report-path:
+    description: Path to the JSON reliability report.
+    value: ${{ steps.metadata.outputs.report-path }}
+  summary-path:
+    description: Path to the Markdown reliability summary.
+    value: ${{ steps.metadata.outputs.summary-path }}
+  schema-version:
+    description: Report schema version.
+    value: ${{ steps.metadata.outputs.schema-version }}
+  run-id:
+    description: Maul run identifier.
+    value: ${{ steps.metadata.outputs.run-id }}
+  unrecovered-sessions:
+    description: Count of faulted sessions without a later same-session recovery.
+    value: ${{ steps.metadata.outputs.unrecovered-sessions }}
+  recovery-events:
+    description: Canonical recovered-fault count.
+    value: ${{ steps.metadata.outputs.recovery-events }}
+  faults-injected:
+    description: Number of injected fault events.
+    value: ${{ steps.metadata.outputs.faults-injected }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install Maul
+      id: setup
+      shell: bash
+      env:
+        MAUL_VERSION: ${{ inputs.version }}
+        MAUL_BINARY_PATH: ${{ inputs.binary-path }}
+      run: bash "${{ github.action_path }}/../setup-maul/install.sh"
+
+    - name: Run maul test
+      id: run
+      shell: bash
+      env:
+        OPENAI_API_KEY: ${{ inputs.openai-api-key }}
+        MAUL_CONFIG: ${{ inputs.config }}
+        MAUL_AGENT: ${{ inputs.agent }}
+        MAUL_REPORT: ${{ inputs.report }}
+        MAUL_FAIL_ON: ${{ inputs.fail-on }}
+        MAUL_TIMEOUT_SECS: ${{ inputs.timeout-secs }}
+      run: |
+        set -euo pipefail
+        args=(test --config "${MAUL_CONFIG}" --agent "${MAUL_AGENT}" --report "${MAUL_REPORT}" --timeout-secs "${MAUL_TIMEOUT_SECS}")
+        if [[ -n "${MAUL_FAIL_ON}" ]]; then
+          args+=(--fail-on "${MAUL_FAIL_ON}")
+        fi
+        maul "${args[@]}"
+
+    - name: Export report metadata
+      id: metadata
+      if: always()
+      shell: bash
+      env:
+        MAUL_REPORT: ${{ inputs.report }}
+      run: |
+        set -euo pipefail
+        python3 - "${MAUL_REPORT}" "${GITHUB_OUTPUT}" <<'PY'
+        import json
+        import pathlib
+        import sys
+
+        report_path = pathlib.Path(sys.argv[1])
+        output_path = pathlib.Path(sys.argv[2])
+        summary_path = report_path.with_suffix(".md")
+        schema = ""
+        run_id = ""
+        unrecovered = ""
+        recovery = ""
+        faults = ""
+        if report_path.is_file():
+            report = json.loads(report_path.read_text())
+            summary = report.get("summary") or {}
+            schema = str(report.get("schema_version") or "")
+            run_id = str(report.get("run_id") or "")
+            unrecovered = str(summary.get("unrecovered_sessions", ""))
+            recovery = str(summary.get("recovery_events", summary.get("post_fault_successes", "")))
+            faults = str(report.get("faults_injected", ""))
+        lines = [
+            f"report-path={report_path}",
+            f"summary-path={summary_path}",
+            f"schema-version={schema}",
+            f"run-id={run_id}",
+            f"unrecovered-sessions={unrecovered}",
+            f"recovery-events={recovery}",
+            f"faults-injected={faults}",
+        ]
+        with output_path.open("a", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        PY
+
+    - name: Append Markdown summary
+      if: always()
+      shell: bash
+      env:
+        MAUL_REPORT: ${{ inputs.report }}
+      run: |
+        set -euo pipefail
+        summary="${MAUL_REPORT%.*}.md"
+        if [[ -f "${summary}" && -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+          cat "${summary}" >> "${GITHUB_STEP_SUMMARY}"
+        fi
+
+    - name: Upload reliability reports
+      if: always()
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: |
+          ${{ inputs.report }}
+          ${{ steps.metadata.outputs.summary-path }}
+        if-no-files-found: warn
+        retention-days: ${{ inputs.artifact-retention-days }}

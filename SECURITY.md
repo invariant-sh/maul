@@ -25,5 +25,8 @@ We aim to acknowledge reports within a few business days.
 ## Safe defaults for operators
 
 - Bind to loopback or a private CI network (`proxy_listen`), not `0.0.0.0` on a public host unless you fully trust the network.
-- Treat `reliability_report.json` as potentially sensitive if paths or payloads were logged in future versions; today it stores path/status/latency/fault labels only.
+- Treat `reliability_report.json` as potentially sensitive. v0.2 stores path/status/latency/fault labels, session ids, and run ids — not prompts or credentials. Keep GitHub Actions artifact retention short (the composite action defaults to 7 days).
+- `X-Maul-Session-Id` is an internal correlation header. Maul strips it before forwarding upstream. Do not put secrets in that header, JSON `user`, or `metadata.maul_session_id`.
+- The GitHub Action installs only Linux x86_64 and macOS arm64 binaries and verifies the published SHA256. Pin the action and binary to the same release tag; do not use `latest`.
+- Do not pass provider secrets to fork pull requests. The action injects `openai-api-key` only into the spawned agent environment and never writes it to config, outputs, or reports.
 - Rotate any key that may have been pasted into a shell history, issue, or commit by mistake.

@@ -15,8 +15,14 @@ cargo test
 cargo run -- --config maul.example.yaml --validate
 ```
 
+Targeted mutation testing for recovery scoring:
+
+```bash
+cargo mutants --file src/report.rs --file src/test_runner.rs --file src/session.rs
+```
+
 Keep production code in `src/` and tests in `tests/`. Prefer small PRs that keep
-logic in `proxy/`, `fault/`, `budget`, and `report`.
+logic in `proxy/`, `fault/`, `budget`, `session`, and `report`.
 
 ## Pull requests
 

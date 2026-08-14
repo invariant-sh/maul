@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/invariant-sh/maul/schemas/reliability_report.v0.2.schema.json",
+  "title": "Maul reliability report",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "run_id",
+    "total_proxy_requests",
+    "billable_llm_calls",
+    "faults_injected",
+    "average_latency_ms",
+    "summary",
+    "requests"
+  ],
+  "properties": {
+    "schema_version": { "const": "0.2" },
+    "run_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "total_proxy_requests": { "type": "integer", "minimum": 0 },
+    "billable_llm_calls": { "type": "integer", "minimum": 0 },
+    "faults_injected": { "type": "integer", "minimum": 0 },
+    "average_latency_ms": { "type": "number", "minimum": 0 },
+    "budget_snapshot": { "type": ["object", "null"] },
+    "pricing_registry_version": { "type": ["string", "null"] },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["session_id", "request_count", "fault_events", "recovery_events"],
+        "properties": {
+          "session_id": { "type": "string" },
+          "request_count": { "type": "integer", "minimum": 0 },
+          "fault_events": { "type": "integer", "minimum": 0 },
+          "recovery_events": { "type": "integer", "minimum": 0 },
+          "recovered": { "type": ["boolean", "null"] }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "required": [
+        "successful_requests",
+        "failed_requests",
+        "budget_rejections",
+        "recovery_events",
+        "post_fault_successes",
+        "fault_events",
+        "sessions_observed",
+        "recovered_sessions",
+        "unrecovered_sessions",
+        "unattributed_requests",
+        "observed_cost_usd"
+      ],
+      "properties": {
+        "successful_requests": { "type": "integer", "minimum": 0 },
+        "failed_requests": { "type": "integer", "minimum": 0 },
+        "budget_rejections": { "type": "integer", "minimum": 0 },
+        "recovery_events": { "type": "integer", "minimum": 0 },
+        "post_fault_successes": { "type": "integer", "minimum": 0 },
+        "fault_events": { "type": "integer", "minimum": 0 },
+        "sessions_observed": { "type": "integer", "minimum": 0 },
+        "recovered_sessions": { "type": "integer", "minimum": 0 },
+        "unrecovered_sessions": { "type": "integer", "minimum": 0 },
+        "unattributed_requests": { "type": "integer", "minimum": 0 },
+        "observed_cost_usd": { "type": "object" }
+      }
+    },
+    "requests": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "status", "latency_ms", "sequence"],
+        "properties": {
+          "path": { "type": "string" },
+          "status": { "type": "integer" },
+          "latency_ms": { "type": "integer", "minimum": 0 },
+          "fault_injected": { "type": ["string", "null"] },
+          "billable": { "type": "boolean" },
+          "session_id": { "type": ["string", "null"] },
+          "sequence": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}
