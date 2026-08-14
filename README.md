@@ -159,7 +159,9 @@ See [`SECURITY.md`](./SECURITY.md) for the full policy and how to report vulnera
 
 ## Contributing
 
-Issues and PRs welcome. Prefer small, reviewable changes that keep `main` boring and logic in modules (`proxy/`, `fault/`, `budget`, `report`).
+Issues and PRs welcome. See [CONTRIBUTING.md](./CONTRIBUTING.md) and the
+[Code of Conduct](./CODE_OF_CONDUCT.md). Prefer small, reviewable changes that
+keep `main` boring and logic in modules (`proxy/`, `fault/`, `budget`, `report`).
 
 ```bash
 cargo fmt
