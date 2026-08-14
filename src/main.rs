@@ -36,7 +36,11 @@ use maul::test_runner::{
 };
 
 #[derive(Debug, Parser)]
-#[command(name = "maul", about = "Adversarial proxy for LLM agent reliability")]
+#[command(
+    name = "maul",
+    version,
+    about = "Adversarial proxy for LLM agent reliability"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<CommandLine>,
