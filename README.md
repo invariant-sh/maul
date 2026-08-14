@@ -24,6 +24,8 @@ Maul is built for **pre-deploy and CI**: spin up, run adversarial scenarios, emi
 
 It is **not** a production policy gateway. That role belongs to sibling products (e.g. Vigil). Maul proves resilience; production enforces the policies those tests reveal.
 
+Part of [Invariant Labs](https://github.com/invariant-sh). Site: [getinvariant.sh](https://getinvariant.sh).
+
 ---
 
 ## Status
@@ -272,7 +274,7 @@ CrewAI/LangGraph often stream by default.
 | **crates.io** | Rust library/binary registry (“packages”) | Later, once LICENSE + API are stable |
 | **GitHub Packages** | GH’s generic package host | Usually skip for Rust CLIs |
 
-Until a stable tagged release is published, install from source: `cargo install --git https://github.com/invariant-sh/maul.git`.
+Install from source: `cargo install --git https://github.com/invariant-sh/maul.git --tag v0.1.0`. GitHub Releases publish tagged binaries. crates.io comes later, once the library API is stable.
 
 ---
 
@@ -284,12 +286,12 @@ Licensed under the [Apache License, Version 2.0](./LICENSE).
 
 ## Related
 
-Part of the [Invariant](https://github.com/invariant-sh) tooling family for trustworthy agent systems:
+Part of [Invariant Labs](https://github.com/invariant-sh) — [getinvariant.sh](https://getinvariant.sh).
 
 | Tool | Role |
 |---|---|
-| **Maul** (this repo) | Adversarial proxy — prove resilience under failure |
-| **Holds** | Task / eval harness — did the agent solve the job? |
-| **Vigil** | Production controls — enforce policy at the edge |
+| **Maul** (this repo) | Adversarial proxy — find failures |
+| **[Holds](https://github.com/invariant-sh/holds)** | Eval harness — measure task quality |
+| **[Vigil](https://github.com/invariant-sh/vigil)** | Runtime policy SDK — prevent incidents and spend |
 
 Install from source: `cargo install --git https://github.com/invariant-sh/maul.git`.
