@@ -1,5 +1,11 @@
 [advisories]
 version = 2
+ignore = [
+    # serde_yaml 0.9.34 links the archived unsafe-libyaml crate. RustSec has no
+    # patched release, and the YAML forks that still match this API use the same
+    # crate. Config load stays on serde_yaml until Maul moves to a safe parser.
+    { id = "RUSTSEC-2024-0449", reason = "serde_yaml depends on archived unsafe-libyaml; no patched release exists" },
+]
 
 [bans]
 multiple-versions = "warn"

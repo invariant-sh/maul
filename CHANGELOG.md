@@ -16,6 +16,10 @@ First stable release. `v0.1.0-alpha.1` was a source-only preview and has no bina
 - `setup-maul` and `maul-test` composite actions that install a pinned, checksum-verified binary
 - GitHub Release archives and `.sha256` checksums for Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64
 
+### Security
+
+- Update `h2`, `rustls`, `rustls-webpki`, `tokio`, and `webpki-root-certs` so the release lockfile clears the current RustSec advisories.
+
 ### Install
 
 Pin the action and the binary to `v0.1.0`. Asset names are `maul-v0.1.0-<target>.tar.gz`. Source install: `cargo install --git https://github.com/invariant-sh/maul.git --tag v0.1.0`.
