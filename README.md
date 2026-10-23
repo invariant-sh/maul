@@ -30,7 +30,7 @@ Part of [Invariant Labs](https://github.com/invariant-sh). Site: [getinvariant.s
 
 ## Status
 
-**v0.1** — OpenAI-compatible reverse proxy, seeded fault injection, observed budget enforcement, a versioned shutdown report, and a CI orchestration command.
+**v0.1.0** — OpenAI-compatible reverse proxy, seeded fault injection, observed budget enforcement, a versioned shutdown report, and a CI orchestration command.
 
 | Capability | Status |
 |---|---|
@@ -52,9 +52,13 @@ Part of [Invariant Labs](https://github.com/invariant-sh). Site: [getinvariant.s
 
 ## Quick start
 
+### Install
+
+Download a checksum-verified binary from [Releases](#releases--packages), or build from this checkout with `cargo run`.
+
 ### Requirements
 
-- Rust toolchain (edition 2024 / recent stable)
+- Rust toolchain (edition 2024 / recent stable), only when building from source
 - An OpenAI API key (or any OpenAI-compatible upstream)
 - An agent or HTTP client that can set `base_url`
 
@@ -285,7 +289,7 @@ jobs:
   maul:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: invariant-sh/maul/.github/actions/maul-test@v0.1.0
         with:
           version: v0.1.0
@@ -296,7 +300,7 @@ jobs:
           openai-api-key: ${{ secrets.OPENAI_API_KEY }}
 ```
 
-Supported runners: Linux x86_64 and macOS arm64. The action verifies the published SHA256, caches the binary, uploads JSON and Markdown reports (default retention 7 days), and appends the Markdown summary to `$GITHUB_STEP_SUMMARY`. Provider secrets stay in the spawned agent environment; they are never written to config, outputs, or reports.
+Supported runners: Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64. The action downloads `maul-<tag>-<target>.tar.gz`, verifies the sibling `.sha256`, caches the binary, uploads JSON and Markdown reports (default retention 7 days), and appends the Markdown summary to `$GITHUB_STEP_SUMMARY`. Provider secrets stay in the spawned agent environment; they are never written to config, outputs, or reports.
 
 Fork PRs should not receive repository provider secrets. Use the credential-free `ci/` fixture for public dogfood.
 
@@ -323,11 +327,38 @@ CrewAI/LangGraph often stream by default.
 
 | Channel | What it is | For Maul |
 |---|---|---|
-| **GitHub Releases** | Version tags + notes (+ optional binaries) | Primary distribution for the `maul` binary |
-| **crates.io** | Rust library/binary registry (“packages”) | Later, once LICENSE + API are stable |
+| **GitHub Releases** | Version tags, notes, and checksum-verified binaries | Primary distribution for the `maul` binary |
+| **crates.io** | Rust library/binary registry | Later, once the library API is stable |
 | **GitHub Packages** | GH’s generic package host | Usually skip for Rust CLIs |
 
-Install from source: `cargo install --git https://github.com/invariant-sh/maul.git --tag v0.1.0-alpha.1`. GitHub Releases publish tagged binaries. crates.io comes later, once the library API is stable.
+### Install a release binary
+
+Release assets are `maul-<tag>-<target>.tar.gz` plus a sibling `.sha256`. The tag keeps the `v` prefix. v0.1.0 publishes:
+
+| Runner | Target triple | Asset |
+|---|---|---|
+| Linux x86_64 | `x86_64-unknown-linux-gnu` | `maul-v0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux arm64 | `aarch64-unknown-linux-gnu` | `maul-v0.1.0-aarch64-unknown-linux-gnu.tar.gz` |
+| macOS x86_64 | `x86_64-apple-darwin` | `maul-v0.1.0-x86_64-apple-darwin.tar.gz` |
+| macOS arm64 | `aarch64-apple-darwin` | `maul-v0.1.0-aarch64-apple-darwin.tar.gz` |
+
+```bash
+tag=v0.1.0
+target=x86_64-unknown-linux-gnu
+archive="maul-${tag}-${target}.tar.gz"
+base="https://github.com/invariant-sh/maul/releases/download/${tag}"
+curl -fsSL -o "${archive}" "${base}/${archive}"
+curl -fsSL -o "${archive}.sha256" "${base}/${archive}.sha256"
+sha256sum -c "${archive}.sha256"    # macOS: shasum -a 256 -c "${archive}.sha256"
+tar -xzf "${archive}"
+mkdir -p "$HOME/.local/bin"
+install "maul-${tag}-${target}/maul" "$HOME/.local/bin/maul"
+maul --version
+```
+
+The archive contains `maul-<tag>-<target>/maul` plus `README.md`, `LICENSE`, and `SECURITY.md`. The checksum file names that archive with no directory prefix, which is what both `sha256sum -c` and `shasum -a 256 -c` expect after the download. `setup-maul` and `maul-test` download these same assets.
+
+Install from source: `cargo install --git https://github.com/invariant-sh/maul.git --tag v0.1.0`.
 
 ---
 

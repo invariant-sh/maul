@@ -2,13 +2,15 @@
 # Download or reuse a Maul binary. Used by setup-maul and maul-test.
 set -euo pipefail
 
-SUPPORTED_ERROR="Maul GitHub Action supports Linux x86_64 and macOS arm64."
+SUPPORTED_ERROR="Maul GitHub Action supports Linux x86_64, Linux arm64, macOS x86_64, and macOS arm64."
 
 resolve_target() {
   local os="${RUNNER_OS:-}"
   local arch="${RUNNER_ARCH:-}"
   case "${os}:${arch}" in
     Linux:X64) echo "x86_64-unknown-linux-gnu" ;;
+    Linux:ARM64) echo "aarch64-unknown-linux-gnu" ;;
+    macOS:X64) echo "x86_64-apple-darwin" ;;
     macOS:ARM64) echo "aarch64-apple-darwin" ;;
     *)
       echo "::error::${SUPPORTED_ERROR} This runner is ${os}/${arch}."
@@ -74,17 +76,21 @@ install_from_release() {
   fi
 
   local repo="${GITHUB_ACTION_REPOSITORY:-invariant-sh/maul}"
-  local base="https://github.com/${repo}/releases/download/${version}"
+  # MAUL_RELEASE_BASE_URL overrides the download host for local contract tests.
+  # It must be the directory that contains maul-<version>-<target>.tar.gz.
+  local base="${MAUL_RELEASE_BASE_URL:-https://github.com/${repo}/releases/download/${version}}"
   local work
   work="$(mktemp -d)"
-  local auth=()
+  # Start non-empty so macOS bash 3.2 does not trip `set -u` on an empty array
+  # when GITHUB_TOKEN is unset. The Actions token is not injected automatically.
+  local curl_args=(-fsSL)
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    auth=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    curl_args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
 
   echo "Downloading ${archive}"
-  curl -fsSL "${auth[@]}" -o "${work}/${archive}" "${base}/${archive}"
-  curl -fsSL "${auth[@]}" -o "${work}/${archive}.sha256" "${base}/${archive}.sha256"
+  curl "${curl_args[@]}" -o "${work}/${archive}" "${base}/${archive}"
+  curl "${curl_args[@]}" -o "${work}/${archive}.sha256" "${base}/${archive}.sha256"
 
   (
     cd "${work}"
@@ -100,8 +106,12 @@ install_from_release() {
   if [[ ! -f "${extracted}" ]]; then
     shopt -s nullglob
     local candidates=( "${work}"/*/maul "${work}/maul" )
-    extracted="${candidates[0]:-}"
     shopt -u nullglob
+    if [[ ${#candidates[@]} -gt 0 ]]; then
+      extracted="${candidates[0]}"
+    else
+      extracted=""
+    fi
   fi
   if [[ -z "${extracted}" ]]; then
     echo "::error::Release archive ${archive} did not contain a maul binary."
